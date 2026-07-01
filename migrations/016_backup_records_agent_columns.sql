@@ -1,0 +1,7 @@
+ALTER TABLE backup_records
+    ADD COLUMN IF NOT EXISTS agent_id INTEGER REFERENCES agents(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS agent_name VARCHAR(100) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS run_host TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS log_ref TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_backup_records_agent_id ON backup_records(agent_id);

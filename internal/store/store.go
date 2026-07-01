@@ -1,0 +1,77 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Store 持有資料庫連線池
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New 建立 Store，執行 migrations
+func New(ctx context.Context, databaseURL string) (*Store, error) {
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("無法連線資料庫: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("資料庫 ping 失敗: %w", err)
+	}
+	s := &Store{pool: pool}
+	if err := s.migrate(ctx); err != nil {
+		return nil, fmt.Errorf("migration 失敗: %w", err)
+	}
+	return s, nil
+}
+
+func (s *Store) Close() {
+	s.pool.Close()
+}
+
+// Pool 暴露底層連線池給需要直接執行 SQL 的地方
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	for _, name := range []string{
+		"001_init.sql",
+		"002_project_details.sql",
+		"003_add_db_password.sql",
+		"004_syslogs_gcp.sql",
+		"005_run_tracking.sql",
+		"006_syslog_source_type.sql",
+		"007_gcp_project_ids.sql",
+		"008_fix_duplicates_unique.sql",
+		"009_default_data_update.sql",
+		"010_schedule_last_status.sql",
+		"011_api_keys.sql",
+		"012_syslog_api_keys.sql",
+		"013_system_api_keys.sql",
+		"014_agents.sql",
+		"015_projects_executor.sql",
+		"016_backup_records_agent_columns.sql",
+		"017_nas_targets.sql",
+		"018_agent_nas_targets.sql",
+		"019_projects_nas_target.sql",
+		"020_syslog_executor.sql",
+	} {
+		path := "/app/migrations/" + name
+		sql, err := os.ReadFile(path)
+		if err != nil {
+			sql, err = os.ReadFile("migrations/" + name)
+			if err != nil {
+				return fmt.Errorf("無法讀取 migration %s: %w", name, err)
+			}
+		}
+		if _, err = s.pool.Exec(ctx, string(sql)); err != nil {
+			return fmt.Errorf("執行 %s 失敗: %w", name, err)
+		}
+	}
+	return nil
+}

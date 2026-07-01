@@ -1,0 +1,836 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+// Project 對應 projects 表
+type Project struct {
+	ID                int       `json:"id"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description"`
+	Enabled           bool      `json:"enabled"`
+	NasBase           string    `json:"nas_base"`
+	NasTargetID       *int      `json:"nas_target_id"`
+	NasSubpath        string    `json:"nas_subpath"`
+	ProjectPath       string    `json:"project_path"`
+	BackupDirs        []string  `json:"backup_dirs"`
+	DbType            string    `json:"db_type"`
+	DbHost            string    `json:"db_host"`
+	DbPort            int       `json:"db_port"`
+	DbName            string    `json:"db_name"`
+	DbUser            string    `json:"db_user"`
+	DbPassword        string    `json:"db_password"`
+	DbPasswordEnv     string    `json:"db_password_env"`
+	DockerDbContainer string    `json:"docker_db_container"`
+	ExecutorType      string    `json:"executor_type"`
+	ExecutorAgentID   *int      `json:"executor_agent_id"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type Agent struct {
+	ID         int        `json:"id"`
+	Code       string     `json:"code"`
+	Name       string     `json:"name"`
+	BaseURL    string     `json:"base_url"`
+	TokenHash  string     `json:"token_hash,omitempty"`
+	Enabled    bool       `json:"enabled"`
+	Status     string     `json:"status"`
+	HostName   string     `json:"host_name"`
+	IPAddress  string     `json:"ip_address"`
+	Version    string     `json:"version"`
+	LastSeenAt *time.Time `json:"last_seen_at"`
+	LastError  string     `json:"last_error"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+type AgentHeartbeat struct {
+	HostName  string `json:"host_name"`
+	IPAddress string `json:"ip_address"`
+	Version   string `json:"version"`
+	LastError string `json:"last_error"`
+}
+
+type NASTarget struct {
+	ID             int       `json:"id"`
+	Code           string    `json:"code"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description"`
+	MountType      string    `json:"mount_type"`
+	RemotePath     string    `json:"remote_path"`
+	DefaultSubpath string    `json:"default_subpath"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// BackupTarget 對應 backup_targets 表
+type BackupTarget struct {
+	ID        int             `json:"id"`
+	ProjectID int             `json:"project_id"`
+	Type      string          `json:"type"`
+	Label     string          `json:"label"`
+	Config    json.RawMessage `json:"config"`
+	Enabled   bool            `json:"enabled"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+// Schedule 對應 schedules 表
+type Schedule struct {
+	ID            int        `json:"id"`
+	ProjectID     int        `json:"project_id"`
+	Label         string     `json:"label"`
+	CronExpr      string     `json:"cron_expr"`
+	TargetTypes   []string   `json:"target_types"`
+	Enabled       bool       `json:"enabled"`
+	LastRunAt     *time.Time `json:"last_run_at"`
+	NextRunAt     *time.Time `json:"next_run_at"`
+	LastRunStatus string     `json:"last_run_status"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// RetentionPolicy 對應 retention_policies 表
+type RetentionPolicy struct {
+	ID          int    `json:"id"`
+	ProjectID   int    `json:"project_id"`
+	TargetType  string `json:"target_type"`
+	KeepDaily   int    `json:"keep_daily"`
+	KeepWeekly  int    `json:"keep_weekly"`
+	KeepMonthly int    `json:"keep_monthly"`
+}
+
+// BackupRecord 對應 backup_records 表
+type BackupRecord struct {
+	ID            int64      `json:"id"`
+	ProjectID     *int       `json:"project_id"`
+	ProjectName   string     `json:"project_name"`
+	TargetID      *int       `json:"target_id"`
+	ScheduleID    *int       `json:"schedule_id"`
+	Type          string     `json:"type"`
+	SubType       string     `json:"sub_type"`
+	Label         string     `json:"label"`
+	Filename      string     `json:"filename"`
+	Path          string     `json:"path"`
+	SizeBytes     int64      `json:"size_bytes"`
+	SizeMB        float64    `json:"size_mb"`
+	Checksum      string     `json:"checksum"`
+	Status        string     `json:"status"`
+	DurationSec   float64    `json:"duration_sec"`
+	ErrorMsg      string     `json:"error_msg"`
+	AgentID       *int       `json:"agent_id"`
+	AgentName     string     `json:"agent_name"`
+	RunHost       string     `json:"run_host"`
+	LogRef        string     `json:"log_ref"`
+	TriggeredBy   string     `json:"triggered_by"`
+	RetainedUntil *time.Time `json:"retained_until"`
+	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// ── Projects ──────────────────────────────────────────────────────────────────
+
+func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, description, enabled, nas_base, nas_target_id, nas_subpath,
+		       project_path, backup_dirs, db_type, db_host, db_port,
+		       db_name, db_user, db_password, db_password_env, docker_db_container,
+		       executor_type, executor_agent_id,
+		       created_at, updated_at
+		FROM projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Enabled,
+			&p.NasBase, &p.NasTargetID, &p.NasSubpath, &p.ProjectPath, &p.BackupDirs, &p.DbType, &p.DbHost,
+			&p.DbPort, &p.DbName, &p.DbUser, &p.DbPassword, &p.DbPasswordEnv,
+			&p.DockerDbContainer, &p.ExecutorType, &p.ExecutorAgentID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+func (s *Store) GetProject(ctx context.Context, id int) (*Project, error) {
+	var p Project
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, name, description, enabled, nas_base, nas_target_id, nas_subpath,
+		       project_path, backup_dirs, db_type, db_host, db_port,
+		       db_name, db_user, db_password, db_password_env, docker_db_container,
+		       executor_type, executor_agent_id,
+		       created_at, updated_at
+		FROM projects WHERE id = $1`, id).
+		Scan(&p.ID, &p.Name, &p.Description, &p.Enabled, &p.NasBase, &p.NasTargetID, &p.NasSubpath,
+			&p.ProjectPath, &p.BackupDirs, &p.DbType, &p.DbHost, &p.DbPort,
+			&p.DbName, &p.DbUser, &p.DbPassword, &p.DbPasswordEnv, &p.DockerDbContainer,
+			&p.ExecutorType, &p.ExecutorAgentID, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Store) CreateProject(ctx context.Context, p *Project) (*Project, error) {
+	if p.BackupDirs == nil {
+		p.BackupDirs = []string{}
+	}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO projects
+		  (name, description, enabled, nas_base, nas_target_id, nas_subpath,
+		   project_path, backup_dirs, db_type, db_host, db_port,
+		   db_name, db_user, db_password, db_password_env, docker_db_container,
+		   executor_type, executor_agent_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		RETURNING id, created_at, updated_at`,
+		p.Name, p.Description, p.Enabled, p.NasBase, p.NasTargetID, p.NasSubpath,
+		p.ProjectPath, p.BackupDirs, p.DbType, p.DbHost, p.DbPort,
+		p.DbName, p.DbUser, p.DbPassword, p.DbPasswordEnv, p.DockerDbContainer,
+		p.ExecutorType, p.ExecutorAgentID).
+		Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+	return p, err
+}
+
+func (s *Store) UpdateProject(ctx context.Context, p *Project) error {
+	if p.BackupDirs == nil {
+		p.BackupDirs = []string{}
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE projects SET
+		  name=$1, description=$2, enabled=$3, nas_base=$4, nas_target_id=$5, nas_subpath=$6,
+		  project_path=$7, backup_dirs=$8, db_type=$9, db_host=$10, db_port=$11,
+		  db_name=$12, db_user=$13, db_password=$14, db_password_env=$15, docker_db_container=$16,
+		  executor_type=$17, executor_agent_id=$18,
+		  updated_at=NOW()
+		WHERE id=$19`,
+		p.Name, p.Description, p.Enabled, p.NasBase, p.NasTargetID, p.NasSubpath,
+		p.ProjectPath, p.BackupDirs, p.DbType, p.DbHost, p.DbPort,
+		p.DbName, p.DbUser, p.DbPassword, p.DbPasswordEnv, p.DockerDbContainer,
+		p.ExecutorType, p.ExecutorAgentID, p.ID)
+	return err
+}
+
+func (s *Store) DeleteProject(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) ToggleProject(ctx context.Context, id int, enabled bool) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE projects SET enabled=$1, updated_at=NOW() WHERE id=$2`, enabled, id)
+	return err
+}
+
+// ── BackupTargets ─────────────────────────────────────────────────────────────
+
+func (s *Store) ListTargets(ctx context.Context, projectID int) ([]BackupTarget, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, project_id, type, label, config, enabled, created_at, updated_at
+		FROM backup_targets WHERE project_id=$1 ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var targets []BackupTarget
+	for rows.Next() {
+		var t BackupTarget
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Type, &t.Label,
+			&t.Config, &t.Enabled, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+	return targets, nil
+}
+
+func (s *Store) GetTarget(ctx context.Context, id int) (*BackupTarget, error) {
+	var t BackupTarget
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, project_id, type, label, config, enabled, created_at, updated_at
+		FROM backup_targets WHERE id=$1`, id).
+		Scan(&t.ID, &t.ProjectID, &t.Type, &t.Label,
+			&t.Config, &t.Enabled, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *Store) CreateTarget(ctx context.Context, t *BackupTarget) (*BackupTarget, error) {
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO backup_targets (project_id, type, label, config, enabled)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, created_at, updated_at`,
+		t.ProjectID, t.Type, t.Label, t.Config, t.Enabled).
+		Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
+	return t, err
+}
+
+func (s *Store) UpdateTarget(ctx context.Context, t *BackupTarget) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE backup_targets SET type=$1, label=$2, config=$3, enabled=$4, updated_at=NOW()
+		WHERE id=$5`,
+		t.Type, t.Label, t.Config, t.Enabled, t.ID)
+	return err
+}
+
+func (s *Store) DeleteTarget(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM backup_targets WHERE id=$1`, id)
+	return err
+}
+
+// ── Schedules ─────────────────────────────────────────────────────────────────
+
+func (s *Store) ListSchedules(ctx context.Context, projectID int) ([]Schedule, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, project_id, label, cron_expr, target_types, enabled,
+		       last_run_at, next_run_at, COALESCE(last_run_status,''), created_at, updated_at
+		FROM schedules WHERE project_id=$1 ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSchedules(rows)
+}
+
+func (s *Store) ListEnabledSchedules(ctx context.Context) ([]Schedule, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.id, s.project_id, s.label, s.cron_expr, s.target_types, s.enabled,
+		       s.last_run_at, s.next_run_at, COALESCE(s.last_run_status,''), s.created_at, s.updated_at
+		FROM schedules s
+		JOIN projects p ON p.id = s.project_id
+		WHERE s.enabled = true AND p.enabled = true AND p.executor_type = 'local'
+		ORDER BY s.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSchedules(rows)
+}
+
+func (s *Store) ListEnabledSchedulesForAgent(ctx context.Context, agentID int) ([]Schedule, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.id, s.project_id, s.label, s.cron_expr, s.target_types, s.enabled,
+		       s.last_run_at, s.next_run_at, COALESCE(s.last_run_status,''), s.created_at, s.updated_at
+		FROM schedules s
+		JOIN projects p ON p.id = s.project_id
+		WHERE s.enabled = true
+		  AND p.enabled = true
+		  AND p.executor_type = 'agent'
+		  AND p.executor_agent_id = $1
+		ORDER BY s.id`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSchedules(rows)
+}
+
+type pgxRows interface {
+	Next() bool
+	Scan(dest ...any) error
+}
+
+func scanSchedules(rows pgxRows) ([]Schedule, error) {
+	var schedules []Schedule
+	for rows.Next() {
+		var sch Schedule
+		if err := rows.Scan(&sch.ID, &sch.ProjectID, &sch.Label, &sch.CronExpr,
+			&sch.TargetTypes, &sch.Enabled, &sch.LastRunAt, &sch.NextRunAt,
+			&sch.LastRunStatus, &sch.CreatedAt, &sch.UpdatedAt); err != nil {
+			return nil, err
+		}
+		schedules = append(schedules, sch)
+	}
+	return schedules, nil
+}
+
+func (s *Store) GetSchedule(ctx context.Context, id int) (*Schedule, error) {
+	var sch Schedule
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, project_id, label, cron_expr, target_types, enabled,
+		       last_run_at, next_run_at, COALESCE(last_run_status,''), created_at, updated_at
+		FROM schedules WHERE id=$1`, id).
+		Scan(&sch.ID, &sch.ProjectID, &sch.Label, &sch.CronExpr,
+			&sch.TargetTypes, &sch.Enabled, &sch.LastRunAt, &sch.NextRunAt,
+			&sch.LastRunStatus, &sch.CreatedAt, &sch.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &sch, nil
+}
+
+func (s *Store) CreateSchedule(ctx context.Context, sch *Schedule) (*Schedule, error) {
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO schedules (project_id, label, cron_expr, target_types, enabled)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, created_at, updated_at`,
+		sch.ProjectID, sch.Label, sch.CronExpr, sch.TargetTypes, sch.Enabled).
+		Scan(&sch.ID, &sch.CreatedAt, &sch.UpdatedAt)
+	return sch, err
+}
+
+func (s *Store) UpdateSchedule(ctx context.Context, sch *Schedule) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE schedules SET label=$1, cron_expr=$2, target_types=$3, enabled=$4, updated_at=NOW()
+		WHERE id=$5`,
+		sch.Label, sch.CronExpr, sch.TargetTypes, sch.Enabled, sch.ID)
+	return err
+}
+
+func (s *Store) DeleteSchedule(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM schedules WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) ToggleSchedule(ctx context.Context, id int, enabled bool) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE schedules SET enabled=$1, updated_at=NOW() WHERE id=$2`, enabled, id)
+	return err
+}
+
+func (s *Store) UpdateScheduleRunTime(ctx context.Context, id int, lastRun, nextRun time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE schedules SET last_run_at=$1, next_run_at=$2 WHERE id=$3`,
+		lastRun, nextRun, id)
+	return err
+}
+
+func (s *Store) UpdateScheduleStatus(ctx context.Context, id int, status string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE schedules SET last_run_status=$1 WHERE id=$2`,
+		status, id)
+	return err
+}
+
+func (s *Store) ListRetention(ctx context.Context, projectID int) ([]RetentionPolicy, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, project_id, target_type, keep_daily, keep_weekly, keep_monthly
+		FROM retention_policies WHERE project_id=$1`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var policies []RetentionPolicy
+	for rows.Next() {
+		var rp RetentionPolicy
+		if err := rows.Scan(&rp.ID, &rp.ProjectID, &rp.TargetType,
+			&rp.KeepDaily, &rp.KeepWeekly, &rp.KeepMonthly); err != nil {
+			return nil, err
+		}
+		policies = append(policies, rp)
+	}
+	return policies, nil
+}
+
+func (s *Store) UpsertRetention(ctx context.Context, rp *RetentionPolicy) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO retention_policies (project_id, target_type, keep_daily, keep_weekly, keep_monthly)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (project_id, target_type)
+		DO UPDATE SET keep_daily=$3, keep_weekly=$4, keep_monthly=$5`,
+		rp.ProjectID, rp.TargetType, rp.KeepDaily, rp.KeepWeekly, rp.KeepMonthly)
+	return err
+}
+
+// ── BackupRecords ─────────────────────────────────────────────────────────────
+
+type ListRecordsFilter struct {
+	ProjectID *int
+	Type      string
+	Status    string
+	Limit     int
+	Offset    int
+}
+
+func (s *Store) ListRecords(ctx context.Context, f ListRecordsFilter) ([]BackupRecord, int64, error) {
+	where := "WHERE 1=1"
+	args := []any{}
+	i := 1
+
+	if f.ProjectID != nil {
+		where += fmt.Sprintf(" AND project_id=$%d", i)
+		args = append(args, *f.ProjectID)
+		i++
+	}
+	if f.Type != "" {
+		where += fmt.Sprintf(" AND type=$%d", i)
+		args = append(args, f.Type)
+		i++
+	}
+	if f.Status != "" {
+		where += fmt.Sprintf(" AND status=$%d", i)
+		args = append(args, f.Status)
+		i++
+	}
+
+	var total int64
+	s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM backup_records "+where, args...).Scan(&total) //nolint
+
+	if f.Limit == 0 {
+		f.Limit = 50
+	}
+	args = append(args, f.Limit, f.Offset)
+
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT id, project_id, project_name, target_id, schedule_id, type, sub_type,
+		       label, filename, path, size_bytes,
+		       ROUND(size_bytes::numeric/1024/1024, 2),
+		       COALESCE(checksum,''), status, COALESCE(duration_sec,0),
+		       COALESCE(error_msg,''), agent_id, COALESCE(agent_name,''), COALESCE(run_host,''), COALESCE(log_ref,''),
+		       triggered_by, retained_until, created_at
+		FROM backup_records %s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d`, where, i, i+1), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var records []BackupRecord
+	for rows.Next() {
+		var r BackupRecord
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.ProjectName, &r.TargetID,
+			&r.ScheduleID, &r.Type, &r.SubType, &r.Label,
+			&r.Filename, &r.Path, &r.SizeBytes, &r.SizeMB,
+			&r.Checksum, &r.Status, &r.DurationSec, &r.ErrorMsg,
+			&r.AgentID, &r.AgentName, &r.RunHost, &r.LogRef,
+			&r.TriggeredBy, &r.RetainedUntil, &r.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		records = append(records, r)
+	}
+	return records, total, nil
+}
+
+func (s *Store) CreateRecord(ctx context.Context, r *BackupRecord) (int64, error) {
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO backup_records
+		  (project_id, project_name, target_id, schedule_id, type, sub_type,
+		   label, filename, path, triggered_by, status, agent_id, agent_name, run_host, log_ref)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running',$11,$12,$13,$14)
+		RETURNING id`,
+		r.ProjectID, r.ProjectName, r.TargetID, r.ScheduleID, r.Type, r.SubType,
+		r.Label, r.Filename, r.Path, r.TriggeredBy, r.AgentID, r.AgentName, r.RunHost, r.LogRef).Scan(&r.ID)
+	return r.ID, err
+}
+
+func (s *Store) UpdateRecord(ctx context.Context, r *BackupRecord) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE backup_records
+		SET status=$1, size_bytes=$2, checksum=$3, duration_sec=$4,
+		    error_msg=$5, retained_until=$6, agent_id=$7, agent_name=$8, run_host=$9, log_ref=$10
+		WHERE id=$11`,
+		r.Status, r.SizeBytes, r.Checksum, r.DurationSec,
+		r.ErrorMsg, r.RetainedUntil, r.AgentID, r.AgentName, r.RunHost, r.LogRef, r.ID)
+	return err
+}
+
+func (s *Store) DeleteRecord(ctx context.Context, id int64) (string, error) {
+	var path string
+	err := s.pool.QueryRow(ctx,
+		`DELETE FROM backup_records WHERE id=$1 RETURNING path`, id).Scan(&path)
+	return path, err
+}
+
+// Summary 統計摘要
+type ProjectSummary struct {
+	ProjectID    int        `json:"project_id"`
+	ProjectName  string     `json:"project_name"`
+	TotalCount   int64      `json:"total_count"`
+	SuccessCount int64      `json:"success_count"`
+	FailedCount  int64      `json:"failed_count"`
+	TotalSizeGB  float64    `json:"total_size_gb"`
+	LastBackupAt *time.Time `json:"last_backup_at"`
+	LastStatus   string     `json:"last_status"`
+}
+
+// ── API Keys ─────────────────────────────────────────────────────────────────
+
+// APIKey 對應 api_keys 表（不含 key_hash）
+type APIKey struct {
+	ID          int        `json:"id"`
+	ProjectID   int        `json:"project_id"`
+	ProjectName string     `json:"project_name,omitempty"`
+	Name        string     `json:"name"`
+	KeyPrefix   string     `json:"key_prefix"`
+	Enabled     bool       `json:"enabled"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+func (s *Store) ListAPIKeys(ctx context.Context, projectID int) ([]APIKey, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT k.id, k.project_id, p.name, k.name, k.key_prefix, k.enabled,
+		       k.last_used_at, k.expires_at, k.created_at
+		FROM api_keys k
+		JOIN projects p ON p.id = k.project_id
+		WHERE k.project_id = $1
+		ORDER BY k.id DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []APIKey
+	for rows.Next() {
+		var k APIKey
+		if err := rows.Scan(&k.ID, &k.ProjectID, &k.ProjectName, &k.Name,
+			&k.KeyPrefix, &k.Enabled, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+func (s *Store) CreateAPIKey(ctx context.Context, projectID int, name, keyHash, keyPrefix string, expiresAt *time.Time) (*APIKey, error) {
+	var k APIKey
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO api_keys (project_id, name, key_hash, key_prefix, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, project_id, name, key_prefix, enabled, last_used_at, expires_at, created_at`,
+		projectID, name, keyHash, keyPrefix, expiresAt).
+		Scan(&k.ID, &k.ProjectID, &k.Name, &k.KeyPrefix,
+			&k.Enabled, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt)
+	return &k, err
+}
+
+func (s *Store) RevokeAPIKey(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `UPDATE api_keys SET enabled=false WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) DeleteAPIKey(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM api_keys WHERE id=$1`, id)
+	return err
+}
+
+// ValidateAPIKey 以 key_hash 查找有效的 API key，並更新 last_used_at
+// 回傳所屬的 project_id；找不到或已停用/過期回傳 0, err
+func (s *Store) ValidateAPIKey(ctx context.Context, keyHash string) (int, error) {
+	var projectID int
+	var enabled bool
+	var expiresAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT project_id, enabled, expires_at FROM api_keys WHERE key_hash=$1`, keyHash).
+		Scan(&projectID, &enabled, &expiresAt)
+	if err != nil {
+		return 0, fmt.Errorf("invalid key")
+	}
+	if !enabled {
+		return 0, fmt.Errorf("key disabled")
+	}
+	if expiresAt != nil && time.Now().After(*expiresAt) {
+		return 0, fmt.Errorf("key expired")
+	}
+	// 非同步更新 last_used_at，不阻塞請求
+	go s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=NOW() WHERE key_hash=$1`, keyHash) //nolint
+	return projectID, nil
+}
+
+// ── Syslog API Keys ───────────────────────────────────────────────────────────
+
+// SyslogAPIKey 對應 syslog_api_keys 表
+type SyslogAPIKey struct {
+	ID         int        `json:"id"`
+	SyslogID   int        `json:"syslog_id"`
+	SyslogName string     `json:"syslog_name,omitempty"`
+	Name       string     `json:"name"`
+	KeyPrefix  string     `json:"key_prefix"`
+	Enabled    bool       `json:"enabled"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+func (s *Store) ListSyslogAPIKeys(ctx context.Context, syslogID int) ([]SyslogAPIKey, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT k.id, k.syslog_id, c.name, k.name, k.key_prefix, k.enabled,
+		       k.last_used_at, k.expires_at, k.created_at
+		FROM syslog_api_keys k
+		JOIN syslog_configs c ON c.id = k.syslog_id
+		WHERE k.syslog_id = $1
+		ORDER BY k.id DESC`, syslogID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []SyslogAPIKey
+	for rows.Next() {
+		var k SyslogAPIKey
+		if err := rows.Scan(&k.ID, &k.SyslogID, &k.SyslogName, &k.Name,
+			&k.KeyPrefix, &k.Enabled, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+func (s *Store) CreateSyslogAPIKey(ctx context.Context, syslogID int, name, keyHash, keyPrefix string, expiresAt *time.Time) (*SyslogAPIKey, error) {
+	var k SyslogAPIKey
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO syslog_api_keys (syslog_id, name, key_hash, key_prefix, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, syslog_id, name, key_prefix, enabled, last_used_at, expires_at, created_at`,
+		syslogID, name, keyHash, keyPrefix, expiresAt).
+		Scan(&k.ID, &k.SyslogID, &k.Name, &k.KeyPrefix,
+			&k.Enabled, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt)
+	return &k, err
+}
+
+func (s *Store) RevokeSyslogAPIKey(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `UPDATE syslog_api_keys SET enabled=false WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) DeleteSyslogAPIKey(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM syslog_api_keys WHERE id=$1`, id)
+	return err
+}
+
+// ValidateSyslogAPIKey 驗證 syslog key，回傳所屬 syslog_id
+func (s *Store) ValidateSyslogAPIKey(ctx context.Context, keyHash string) (int, error) {
+	var syslogID int
+	var enabled bool
+	var expiresAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT syslog_id, enabled, expires_at FROM syslog_api_keys WHERE key_hash=$1`, keyHash).
+		Scan(&syslogID, &enabled, &expiresAt)
+	if err != nil {
+		return 0, fmt.Errorf("invalid key")
+	}
+	if !enabled {
+		return 0, fmt.Errorf("key disabled")
+	}
+	if expiresAt != nil && time.Now().After(*expiresAt) {
+		return 0, fmt.Errorf("key expired")
+	}
+	go s.pool.Exec(ctx, `UPDATE syslog_api_keys SET last_used_at=NOW() WHERE key_hash=$1`, keyHash) //nolint
+	return syslogID, nil
+}
+
+// ── System API Keys ───────────────────────────────────────────────────────────
+
+// SystemAPIKey 對應 system_api_keys 表（不含 key_hash）
+type SystemAPIKey struct {
+	ID         int        `json:"id"`
+	Name       string     `json:"name"`
+	KeyPrefix  string     `json:"key_prefix"`
+	Enabled    bool       `json:"enabled"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+func (s *Store) ListSystemAPIKeys(ctx context.Context) ([]SystemAPIKey, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, key_prefix, enabled, last_used_at, expires_at, created_at
+		FROM system_api_keys
+		ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []SystemAPIKey
+	for rows.Next() {
+		var k SystemAPIKey
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &k.Enabled,
+			&k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+func (s *Store) CreateSystemAPIKey(ctx context.Context, name, keyHash, keyPrefix string, expiresAt *time.Time) (*SystemAPIKey, error) {
+	var k SystemAPIKey
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO system_api_keys (name, key_hash, key_prefix, expires_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, name, key_prefix, enabled, last_used_at, expires_at, created_at`,
+		name, keyHash, keyPrefix, expiresAt).
+		Scan(&k.ID, &k.Name, &k.KeyPrefix, &k.Enabled,
+			&k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt)
+	return &k, err
+}
+
+func (s *Store) RevokeSystemAPIKey(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `UPDATE system_api_keys SET enabled=false WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) DeleteSystemAPIKey(ctx context.Context, id int) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM system_api_keys WHERE id=$1`, id)
+	return err
+}
+
+// ValidateSystemAPIKey 驗證 system key，有效時回傳 nil
+func (s *Store) ValidateSystemAPIKey(ctx context.Context, keyHash string) error {
+	var enabled bool
+	var expiresAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT enabled, expires_at FROM system_api_keys WHERE key_hash=$1`, keyHash).
+		Scan(&enabled, &expiresAt)
+	if err != nil {
+		return fmt.Errorf("invalid key")
+	}
+	if !enabled {
+		return fmt.Errorf("key disabled")
+	}
+	if expiresAt != nil && time.Now().After(*expiresAt) {
+		return fmt.Errorf("key expired")
+	}
+	go s.pool.Exec(ctx, `UPDATE system_api_keys SET last_used_at=NOW() WHERE key_hash=$1`, keyHash) //nolint
+	return nil
+}
+
+// ── Summary ───────────────────────────────────────────────────────────────────
+
+func (s *Store) Summary(ctx context.Context) ([]ProjectSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT
+		  project_id,
+		  project_name,
+		  COUNT(*) AS total_count,
+		  SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),
+		  SUM(CASE WHEN status='failed'  THEN 1 ELSE 0 END),
+		  ROUND(SUM(size_bytes)::numeric / 1024 / 1024 / 1024, 3),
+		  MAX(created_at),
+		  (SELECT status FROM backup_records r2
+		   WHERE r2.project_id = r.project_id ORDER BY created_at DESC LIMIT 1)
+		FROM backup_records r
+		WHERE project_id IS NOT NULL
+		GROUP BY project_id, project_name
+		ORDER BY project_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []ProjectSummary
+	for rows.Next() {
+		var ps ProjectSummary
+		if err := rows.Scan(&ps.ProjectID, &ps.ProjectName, &ps.TotalCount,
+			&ps.SuccessCount, &ps.FailedCount, &ps.TotalSizeGB,
+			&ps.LastBackupAt, &ps.LastStatus); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, ps)
+	}
+	return summaries, nil
+}
