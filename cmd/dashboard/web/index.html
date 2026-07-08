@@ -4369,7 +4369,7 @@ async function showAgentInstaller(agentId, agentName) {
               <textarea id="agent-installer-command" class="form-input mono" style="min-height:220px">${esc(res.install_command || '')}</textarea>
               <button class="btn btn-secondary" onclick="copyText('agent-installer-command')">複製</button>
             </div>
-            <div class="form-hint">會自動下載最新編譯檔、寫入 `/etc/backup-agent/env`，並執行 `install-agent.sh`。</div>
+            <div class="form-hint">會自動下載最新編譯檔、寫入 <code>/etc/backup-agent/env</code>，並執行 <code>install-agent.sh</code>。</div>
           </div>
           <div class="table-wrap">
             <table>
