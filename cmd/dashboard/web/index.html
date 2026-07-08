@@ -4427,13 +4427,22 @@ async function loadAgentReleaseCapability() {
     const cap = await apiGet('/api/admin/agent-releases/capability');
     if (cap.available) {
       btn.disabled = false;
+      btn.dataset.buildAvailable = '1';
+      btn.dataset.buildReason = '';
+      btn.title = '';
       el.innerHTML = `目前可建置。workspace：<span class="mono">${esc(cap.workdir || '—')}</span>，script：<span class="mono">${esc(cap.script || '—')}</span>`;
       return;
     }
-    btn.disabled = true;
+    btn.disabled = false;
+    btn.dataset.buildAvailable = '0';
+    btn.dataset.buildReason = cap.reason || '未知原因';
+    btn.title = `目前不可建置：${cap.reason || '未知原因'}`;
     el.innerHTML = `目前不可建置：${esc(cap.reason || '未知原因')}<br>workspace：<span class="mono">${esc(cap.workdir || '—')}</span>，script：<span class="mono">${esc(cap.script || '—')}</span>`;
   } catch(e) {
-    btn.disabled = true;
+    btn.disabled = false;
+    btn.dataset.buildAvailable = '0';
+    btn.dataset.buildReason = e.message || '無法檢查 build 能力';
+    btn.title = `無法檢查 build 能力：${e.message}`;
     el.textContent = `無法檢查 build 能力：${e.message}`;
   }
 }
@@ -4470,8 +4479,9 @@ async function loadAgentReleases() {
 
 async function buildAgentRelease() {
   const btn = document.getElementById('agent-release-build-btn');
-  if (btn && btn.disabled) {
-    toast('目前環境未啟用 agent release build，請先確認上方說明', 'warning');
+  if (btn && btn.dataset.buildAvailable === '0') {
+    const reason = btn.dataset.buildReason || '請先確認上方說明';
+    toast(`目前環境未啟用 agent release build：${reason}`, 'warning');
     return;
   }
   const version = document.getElementById('agent-release-version')?.value.trim();
