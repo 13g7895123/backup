@@ -82,12 +82,17 @@ func RegisterAgentReleaseRoutes(mux *http.ServeMux, s *store.Store) {
 }
 
 func (h *releaseHandler) capability(w http.ResponseWriter, r *http.Request) {
+	localCap := detectReleaseCapability()
+	if localCap.Available {
+		localCap.Builder = "dashboard-local"
+		writeJSON(w, http.StatusOK, localCap)
+		return
+	}
+
 	builder, err := h.resolveBuilderAgent(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusOK, agentReleaseCapability{
-			Available: false,
-			Reason:    err.Error(),
-		})
+		localCap.Reason = strings.TrimSpace(localCap.Reason + "；fallback build agent 不可用: " + err.Error())
+		writeJSON(w, http.StatusOK, localCap)
 		return
 	}
 	cap, err := fetchAgentReleaseCapability(r.Context(), builder)
@@ -124,17 +129,25 @@ func (h *releaseHandler) build(w http.ResponseWriter, r *http.Request) {
 
 	logger.Printf("release build request start version=%s remote=%s user_agent=%q", body.Version, r.RemoteAddr, r.UserAgent())
 
-	builder, err := h.resolveBuilderAgent(r.Context())
-	if err != nil {
-		logger.Printf("resolve build agent failed version=%s error=%v", body.Version, err)
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":   err.Error(),
-			"log_ref": logPath,
-		})
-		return
+	var (
+		detail  *agentReleaseDetail
+		builder *store.Agent
+	)
+	if capability := detectReleaseCapability(); capability.Available {
+		logger.Printf("build release locally version=%s workdir=%s script=%s", body.Version, capability.Workdir, capability.Script)
+		detail, err = buildReleaseLocally(r.Context(), h.rootDir, body.Version, r, logger, logPath)
+	} else {
+		builder, err = h.resolveBuilderAgent(r.Context())
+		if err != nil {
+			logger.Printf("resolve build agent failed version=%s error=%v", body.Version, err)
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   capability.Reason + "；fallback build agent 不可用: " + err.Error(),
+				"log_ref": logPath,
+			})
+			return
+		}
+		detail, err = h.buildReleaseViaAgent(r.Context(), body.Version, r, logger, logPath, builder)
 	}
-
-	detail, err := h.buildReleaseViaAgent(r.Context(), body.Version, r, logger, logPath, builder)
 	if err != nil {
 		logger.Printf("release build request failed version=%s error=%v", body.Version, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

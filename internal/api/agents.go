@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +27,7 @@ func RegisterAgentsRoutes(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("PUT /api/agents/{id}", h.update)
 	mux.HandleFunc("GET /api/agents/{id}/config", h.getConfig)
 	mux.HandleFunc("POST /api/agents/{id}/config", h.updateConfig)
+	mux.HandleFunc("GET /api/agents/{id}/installer", h.getInstaller)
 	mux.HandleFunc("GET /api/nas-targets", h.listNASTargets)
 	mux.HandleFunc("POST /api/agents/{id}/test/preflight", h.preflightTest)
 }
@@ -48,6 +52,18 @@ type agentConfigPayload struct {
 	TokenPreview    string `json:"token_preview,omitempty"`
 	CreatedAgent    any    `json:"created_agent,omitempty"`
 	UpdatedAgent    any    `json:"updated_agent,omitempty"`
+}
+
+type agentInstallPayload struct {
+	Agent            *store.Agent        `json:"agent"`
+	AgentConfig      agentConfigPayload  `json:"agent_config"`
+	Release          *agentReleaseDetail `json:"release,omitempty"`
+	InstallCommand   string              `json:"install_command,omitempty"`
+	ApplyCommand     string              `json:"apply_command,omitempty"`
+	RestartCommand   string              `json:"restart_command,omitempty"`
+	DownloadURL      string              `json:"download_url,omitempty"`
+	ChecksumURL      string              `json:"checksum_url,omitempty"`
+	InstallScriptURL string              `json:"install_script_url,omitempty"`
 }
 
 func (h *agentsHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -249,6 +265,39 @@ func (h *agentsHandler) updateConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *agentsHandler) getInstaller(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 id")
+		return
+	}
+	agentRow, err := h.store.GetAgent(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到 agent")
+		return
+	}
+
+	cfg := buildAgentConfigPayload(agentRow, nil, r)
+	payload := agentInstallPayload{
+		Agent:          agentRow,
+		AgentConfig:    cfg,
+		ApplyCommand:   cfg.ApplyCommand,
+		RestartCommand: cfg.RestartCommand,
+	}
+
+	release, err := latestAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), r)
+	if err != nil {
+		writeJSON(w, http.StatusOK, payload)
+		return
+	}
+	payload.Release = release
+	payload.InstallCommand = buildDebianInstallCommand(release, cfg)
+	payload.DownloadURL = releaseAssetURL(release, ".tar.gz")
+	payload.ChecksumURL = releaseAssetURL(release, "_checksums.txt")
+	payload.InstallScriptURL = releaseAssetURL(release, "install-agent.sh")
+	writeJSON(w, http.StatusOK, payload)
+}
+
 func (h *agentsHandler) preflightTest(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r, "id")
 	if err != nil {
@@ -411,6 +460,80 @@ sudo systemctl daemon-reload
 sudo systemctl restart backup-agent
 sudo systemctl status backup-agent --no-pager
 `, envContent))
+}
+
+func latestAgentReleaseDetail(rootDir string, r *http.Request) (*agentReleaseDetail, error) {
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]agentReleaseManifest, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(rootDir, entry.Name(), "manifest.json"))
+		if err != nil {
+			continue
+		}
+		var manifest agentReleaseManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			continue
+		}
+		items = append(items, manifest)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("找不到 agent release")
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].BuiltAt.After(items[j].BuiltAt)
+	})
+	manifest := items[0]
+	detail := &agentReleaseDetail{
+		agentReleaseManifest: manifest,
+		InstallCommand:       (&releaseHandler{}).installCommand(r, manifest.Version),
+		UpgradeCommand:       (&releaseHandler{}).installCommand(r, manifest.Version),
+	}
+	for i := range detail.Files {
+		detail.Files[i].DownloadURL = fmt.Sprintf("%s/api/admin/agent-releases/%s/download/%s", baseURL(r), manifest.Version, detail.Files[i].Name)
+	}
+	return detail, nil
+}
+
+func releaseAssetURL(rel *agentReleaseDetail, suffix string) string {
+	if rel == nil {
+		return ""
+	}
+	for _, file := range rel.Files {
+		if strings.HasSuffix(file.Name, suffix) {
+			return file.DownloadURL
+		}
+	}
+	return ""
+}
+
+func buildDebianInstallCommand(rel *agentReleaseDetail, cfg agentConfigPayload) string {
+	if rel == nil {
+		return ""
+	}
+	tarURL := releaseAssetURL(rel, ".tar.gz")
+	if tarURL == "" {
+		return ""
+	}
+	tarName := filepath.Base(tarURL)
+	extractDir := strings.TrimSuffix(tarName, ".tar.gz")
+	return strings.TrimSpace(fmt.Sprintf(`
+tmpdir="$(mktemp -d)" && cd "$tmpdir"
+curl -fsSLO %s
+tar -xzf %s
+cd %s
+sudo install -d -m 755 /etc/backup-agent
+sudo tee /etc/backup-agent/env >/dev/null <<'EOF'
+%sEOF
+sudo AGENT_BINARY_SRC=./backup-agent-linux-amd64 ./install-agent.sh
+`, tarURL, tarName, extractDir, cfg.EnvContent))
 }
 
 func previewToken(token string) string {
