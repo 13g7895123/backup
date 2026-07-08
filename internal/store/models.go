@@ -28,6 +28,7 @@ type Project struct {
 	DockerDbContainer string    `json:"docker_db_container"`
 	ExecutorType      string    `json:"executor_type"`
 	ExecutorAgentID   *int      `json:"executor_agent_id"`
+	TransferMode      string    `json:"transfer_mode"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -133,6 +134,24 @@ type BackupRecord struct {
 	CreatedAt     time.Time  `json:"created_at"`
 }
 
+type RestoreRecord struct {
+	ID             int64      `json:"id"`
+	BackupRecordID int64      `json:"backup_record_id"`
+	ProjectID      *int       `json:"project_id"`
+	ProjectName    string     `json:"project_name"`
+	Type           string     `json:"type"`
+	Strategy       string     `json:"strategy"`
+	Target         string     `json:"target"`
+	Status         string     `json:"status"`
+	SnapshotPath   string     `json:"snapshot_path"`
+	ErrorMsg       string     `json:"error_msg"`
+	AgentID        *int       `json:"agent_id"`
+	AgentName      string     `json:"agent_name"`
+	RunHost        string     `json:"run_host"`
+	StartedAt      time.Time  `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at"`
+}
+
 // ── Projects ──────────────────────────────────────────────────────────────────
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
@@ -140,7 +159,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		SELECT id, name, description, enabled, nas_base, nas_target_id, nas_subpath,
 		       project_path, backup_dirs, db_type, db_host, db_port,
 		       db_name, db_user, db_password, db_password_env, docker_db_container,
-		       executor_type, executor_agent_id,
+		       executor_type, executor_agent_id, transfer_mode,
 		       created_at, updated_at
 		FROM projects ORDER BY name`)
 	if err != nil {
@@ -154,7 +173,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Enabled,
 			&p.NasBase, &p.NasTargetID, &p.NasSubpath, &p.ProjectPath, &p.BackupDirs, &p.DbType, &p.DbHost,
 			&p.DbPort, &p.DbName, &p.DbUser, &p.DbPassword, &p.DbPasswordEnv,
-			&p.DockerDbContainer, &p.ExecutorType, &p.ExecutorAgentID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.DockerDbContainer, &p.ExecutorType, &p.ExecutorAgentID, &p.TransferMode, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)
@@ -168,13 +187,13 @@ func (s *Store) GetProject(ctx context.Context, id int) (*Project, error) {
 		SELECT id, name, description, enabled, nas_base, nas_target_id, nas_subpath,
 		       project_path, backup_dirs, db_type, db_host, db_port,
 		       db_name, db_user, db_password, db_password_env, docker_db_container,
-		       executor_type, executor_agent_id,
+		       executor_type, executor_agent_id, transfer_mode,
 		       created_at, updated_at
 		FROM projects WHERE id = $1`, id).
 		Scan(&p.ID, &p.Name, &p.Description, &p.Enabled, &p.NasBase, &p.NasTargetID, &p.NasSubpath,
 			&p.ProjectPath, &p.BackupDirs, &p.DbType, &p.DbHost, &p.DbPort,
 			&p.DbName, &p.DbUser, &p.DbPassword, &p.DbPasswordEnv, &p.DockerDbContainer,
-			&p.ExecutorType, &p.ExecutorAgentID, &p.CreatedAt, &p.UpdatedAt)
+			&p.ExecutorType, &p.ExecutorAgentID, &p.TransferMode, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -190,13 +209,13 @@ func (s *Store) CreateProject(ctx context.Context, p *Project) (*Project, error)
 		  (name, description, enabled, nas_base, nas_target_id, nas_subpath,
 		   project_path, backup_dirs, db_type, db_host, db_port,
 		   db_name, db_user, db_password, db_password_env, docker_db_container,
-		   executor_type, executor_agent_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		   executor_type, executor_agent_id, transfer_mode)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id, created_at, updated_at`,
 		p.Name, p.Description, p.Enabled, p.NasBase, p.NasTargetID, p.NasSubpath,
 		p.ProjectPath, p.BackupDirs, p.DbType, p.DbHost, p.DbPort,
 		p.DbName, p.DbUser, p.DbPassword, p.DbPasswordEnv, p.DockerDbContainer,
-		p.ExecutorType, p.ExecutorAgentID).
+		p.ExecutorType, p.ExecutorAgentID, p.TransferMode).
 		Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 	return p, err
 }
@@ -210,13 +229,13 @@ func (s *Store) UpdateProject(ctx context.Context, p *Project) error {
 		  name=$1, description=$2, enabled=$3, nas_base=$4, nas_target_id=$5, nas_subpath=$6,
 		  project_path=$7, backup_dirs=$8, db_type=$9, db_host=$10, db_port=$11,
 		  db_name=$12, db_user=$13, db_password=$14, db_password_env=$15, docker_db_container=$16,
-		  executor_type=$17, executor_agent_id=$18,
+		  executor_type=$17, executor_agent_id=$18, transfer_mode=$19,
 		  updated_at=NOW()
-		WHERE id=$19`,
+		WHERE id=$20`,
 		p.Name, p.Description, p.Enabled, p.NasBase, p.NasTargetID, p.NasSubpath,
 		p.ProjectPath, p.BackupDirs, p.DbType, p.DbHost, p.DbPort,
 		p.DbName, p.DbUser, p.DbPassword, p.DbPasswordEnv, p.DockerDbContainer,
-		p.ExecutorType, p.ExecutorAgentID, p.ID)
+		p.ExecutorType, p.ExecutorAgentID, p.TransferMode, p.ID)
 	return err
 }
 
@@ -515,6 +534,29 @@ func (s *Store) ListRecords(ctx context.Context, f ListRecordsFilter) ([]BackupR
 	return records, total, nil
 }
 
+func (s *Store) GetRecord(ctx context.Context, id int64) (*BackupRecord, error) {
+	var r BackupRecord
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, project_id, project_name, target_id, schedule_id, type, sub_type,
+		       label, filename, path, size_bytes,
+		       ROUND(size_bytes::numeric/1024/1024, 2),
+		       COALESCE(checksum,''), status, COALESCE(duration_sec,0),
+		       COALESCE(error_msg,''), agent_id, COALESCE(agent_name,''), COALESCE(run_host,''), COALESCE(log_ref,''),
+		       triggered_by, retained_until, created_at
+		FROM backup_records
+		WHERE id=$1`, id).
+		Scan(&r.ID, &r.ProjectID, &r.ProjectName, &r.TargetID,
+			&r.ScheduleID, &r.Type, &r.SubType, &r.Label,
+			&r.Filename, &r.Path, &r.SizeBytes, &r.SizeMB,
+			&r.Checksum, &r.Status, &r.DurationSec, &r.ErrorMsg,
+			&r.AgentID, &r.AgentName, &r.RunHost, &r.LogRef,
+			&r.TriggeredBy, &r.RetainedUntil, &r.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 func (s *Store) CreateRecord(ctx context.Context, r *BackupRecord) (int64, error) {
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO backup_records
@@ -538,11 +580,80 @@ func (s *Store) UpdateRecord(ctx context.Context, r *BackupRecord) error {
 	return err
 }
 
+func (s *Store) UpdateRecordPath(ctx context.Context, id int64, filename, path string, sizeBytes int64, checksum string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE backup_records
+		SET filename=$1, path=$2, size_bytes=$3, checksum=$4
+		WHERE id=$5`,
+		filename, path, sizeBytes, checksum, id)
+	return err
+}
+
 func (s *Store) DeleteRecord(ctx context.Context, id int64) (string, error) {
 	var path string
 	err := s.pool.QueryRow(ctx,
 		`DELETE FROM backup_records WHERE id=$1 RETURNING path`, id).Scan(&path)
 	return path, err
+}
+
+func (s *Store) CreateRestoreRecord(ctx context.Context, r *RestoreRecord) (int64, error) {
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO restore_records
+		  (backup_record_id, project_id, project_name, type, strategy, target, status,
+		   agent_id, agent_name, run_host)
+		VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9)
+		RETURNING id`,
+		r.BackupRecordID, r.ProjectID, r.ProjectName, r.Type, r.Strategy, r.Target,
+		r.AgentID, r.AgentName, r.RunHost).Scan(&r.ID)
+	return r.ID, err
+}
+
+func (s *Store) FinishRestoreRecord(ctx context.Context, id int64, status, snapshotPath, errorMsg string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE restore_records
+		SET status=$1, snapshot_path=$2, error_msg=$3, finished_at=NOW()
+		WHERE id=$4`,
+		status, snapshotPath, errorMsg, id)
+	return err
+}
+
+func (s *Store) ListRestoreRecords(ctx context.Context, projectID *int, limit, offset int) ([]RestoreRecord, int64, error) {
+	where := "WHERE 1=1"
+	args := []any{}
+	i := 1
+	if projectID != nil {
+		where += fmt.Sprintf(" AND project_id=$%d", i)
+		args = append(args, *projectID)
+		i++
+	}
+	if limit == 0 {
+		limit = 50
+	}
+	var total int64
+	s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM restore_records "+where, args...).Scan(&total) //nolint
+	args = append(args, limit, offset)
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT id, backup_record_id, project_id, project_name, type, strategy, target,
+		       status, snapshot_path, error_msg, agent_id, agent_name, run_host,
+		       started_at, finished_at
+		FROM restore_records %s
+		ORDER BY started_at DESC
+		LIMIT $%d OFFSET $%d`, where, i, i+1), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var records []RestoreRecord
+	for rows.Next() {
+		var r RestoreRecord
+		if err := rows.Scan(&r.ID, &r.BackupRecordID, &r.ProjectID, &r.ProjectName,
+			&r.Type, &r.Strategy, &r.Target, &r.Status, &r.SnapshotPath, &r.ErrorMsg,
+			&r.AgentID, &r.AgentName, &r.RunHost, &r.StartedAt, &r.FinishedAt); err != nil {
+			return nil, 0, err
+		}
+		records = append(records, r)
+	}
+	return records, total, nil
 }
 
 // Summary 統計摘要

@@ -26,9 +26,14 @@ type BackingStore interface {
 	DeleteRecord(ctx context.Context, id int64) (string, error)
 }
 
+type Uploader interface {
+	UploadBackup(ctx context.Context, recordID int64, filePath, checksum string) error
+}
+
 // Runner 執行備份並寫入紀錄
 type Runner struct {
 	Store    BackingStore
+	Uploader Uploader
 	Notifier *notify.Slack
 }
 
@@ -60,6 +65,20 @@ func (r *Runner) RunTargetWithOptions(ctx context.Context, proj *store.Project, 
 	}
 
 	destPath := filepath.Join(destDir, filename)
+	backupDestDir := destDir
+	backupDestPath := destPath
+	uploadMode := strings.EqualFold(proj.TransferMode, "upload")
+	if uploadMode {
+		if r.Uploader == nil {
+			return fmt.Errorf("project transfer_mode=upload 但 runner 未設定 uploader")
+		}
+		stagingRoot := os.Getenv("BACKUP_AGENT_STAGING_DIR")
+		if stagingRoot == "" {
+			stagingRoot = "/var/tmp/backup-agent/staging"
+		}
+		backupDestDir = filepath.Join(stagingRoot, fmt.Sprintf("record_%d", time.Now().UnixNano()), target.Type)
+		backupDestPath = filepath.Join(backupDestDir, filename)
+	}
 	runID := buildRunID(proj.Name, target.Type, opts.Smoke)
 	logRef, logger, closeLog, err := newRunLogger(runID)
 	if err != nil {
@@ -102,7 +121,7 @@ func (r *Runner) RunTargetWithOptions(ctx context.Context, proj *store.Project, 
 		if err := json.Unmarshal(target.Config, &cfg); err != nil {
 			backupErr = fmt.Errorf("解析 files config 失敗: %w", err)
 		} else {
-			checksum, size, backupErr = BackupFiles(cfg, destPath)
+			checksum, size, backupErr = BackupFiles(cfg, backupDestPath)
 		}
 
 	case "database":
@@ -145,7 +164,7 @@ func (r *Runner) RunTargetWithOptions(ctx context.Context, proj *store.Project, 
 				}
 			}
 			rec.SubType = cfg.DBType
-			checksum, size, backupErr = BackupDatabase(cfg, destPath)
+			checksum, size, backupErr = BackupDatabase(cfg, backupDestPath)
 		}
 
 	case "system":
@@ -155,7 +174,7 @@ func (r *Runner) RunTargetWithOptions(ctx context.Context, proj *store.Project, 
 			backupErr = fmt.Errorf("解析 system config 失敗: %w", err)
 		} else {
 			rec.SubType = "debian"
-			checksum, size, backupErr = BackupSystem(cfg, destDir, timestamp)
+			checksum, size, backupErr = BackupSystem(cfg, backupDestDir, timestamp)
 		}
 
 	default:
@@ -177,8 +196,21 @@ func (r *Runner) RunTargetWithOptions(ctx context.Context, proj *store.Project, 
 		rec.ErrorMsg = backupErr.Error()
 		logger.Printf("run failed duration_sec=%.2f err=%v", duration, backupErr)
 	} else {
-		rec.Status = "success"
-		logger.Printf("run success duration_sec=%.2f size_bytes=%d checksum=%s", duration, size, checksum)
+		if uploadMode {
+			logger.Printf("upload start record_id=%d file=%s", rec.ID, backupDestPath)
+			backupErr = r.Uploader.UploadBackup(ctx, rec.ID, backupDestPath, checksum)
+			if removeErr := os.RemoveAll(filepath.Dir(filepath.Dir(backupDestPath))); removeErr != nil {
+				logger.Printf("cleanup staging warning: %v", removeErr)
+			}
+		}
+		if backupErr != nil {
+			rec.Status = "failed"
+			rec.ErrorMsg = backupErr.Error()
+			logger.Printf("upload failed duration_sec=%.2f err=%v", duration, backupErr)
+		} else {
+			rec.Status = "success"
+			logger.Printf("run success duration_sec=%.2f size_bytes=%d checksum=%s", duration, size, checksum)
+		}
 	}
 
 	r.Store.UpdateRecord(ctx, rec) //nolint

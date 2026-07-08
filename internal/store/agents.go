@@ -254,6 +254,21 @@ func (s *Store) AgentOwnsSchedule(ctx context.Context, agentID, scheduleID int) 
 	return ok, err
 }
 
+func (s *Store) AgentOwnsRecord(ctx context.Context, agentID int, recordID int64) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM backup_records r
+			JOIN projects p ON p.id = r.project_id
+			WHERE r.id = $1
+			  AND p.enabled = true
+			  AND p.executor_type = 'agent'
+			  AND p.executor_agent_id = $2
+		)`, recordID, agentID).Scan(&ok)
+	return ok, err
+}
+
 func (s *Store) AgentSupportsProjectNAS(ctx context.Context, agentID int, nasTargetID *int) (bool, error) {
 	if nasTargetID == nil {
 		return true, nil

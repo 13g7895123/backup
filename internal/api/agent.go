@@ -2,8 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +68,10 @@ func RegisterAgentRoutes(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("GET /api/agent/projects/{id}/targets", agentMiddleware(s, h.listTargets))
 	mux.HandleFunc("GET /api/agent/projects/{id}/retention", agentMiddleware(s, h.listRetention))
 	mux.HandleFunc("POST /api/agent/records", agentMiddleware(s, h.createRecord))
+	mux.HandleFunc("GET /api/agent/records/{id}", agentMiddleware(s, h.getRecord))
 	mux.HandleFunc("PUT /api/agent/records/{id}", agentMiddleware(s, h.updateRecord))
+	mux.HandleFunc("POST /api/agent/records/{id}/upload", agentMiddleware(s, h.uploadRecord))
+	mux.HandleFunc("GET /api/agent/records/{id}/download", agentMiddleware(s, h.downloadRecord))
 }
 
 func (h *agentHandler) requireAgent(w http.ResponseWriter, r *http.Request) (*store.Agent, bool) {
@@ -227,9 +236,11 @@ func (h *agentHandler) getProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "找不到專案")
 		return
 	}
-	if err := h.store.ResolveProjectNASForAgent(r.Context(), project, agent.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if project.TransferMode != "upload" {
+		if err := h.store.ResolveProjectNASForAgent(r.Context(), project, agent.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, project)
 }
@@ -298,6 +309,19 @@ func (h *agentHandler) createRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "無效的 JSON: "+err.Error())
 		return
 	}
+	if rec.ProjectID == nil {
+		writeError(w, http.StatusBadRequest, "project_id required")
+		return
+	}
+	owns, err := h.store.AgentOwnsProject(r.Context(), agent.ID, *rec.ProjectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !owns {
+		writeError(w, http.StatusForbidden, "project not assigned to agent")
+		return
+	}
 	rec.AgentID = &agent.ID
 	rec.AgentName = agent.Name
 	rec.RunHost = agent.HostName
@@ -309,6 +333,33 @@ func (h *agentHandler) createRecord(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
+func (h *agentHandler) getRecord(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 id")
+		return
+	}
+	owns, err := h.store.AgentOwnsRecord(r.Context(), agent.ID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !owns {
+		writeError(w, http.StatusForbidden, "record not assigned to agent")
+		return
+	}
+	rec, err := h.store.GetRecord(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到備份紀錄")
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 func (h *agentHandler) updateRecord(w http.ResponseWriter, r *http.Request) {
 	agent, ok := h.requireAgent(w, r)
 	if !ok {
@@ -317,6 +368,15 @@ func (h *agentHandler) updateRecord(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "無效的 id")
+		return
+	}
+	owns, err := h.store.AgentOwnsRecord(r.Context(), agent.ID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !owns {
+		writeError(w, http.StatusForbidden, "record not assigned to agent")
 		return
 	}
 	var rec store.BackupRecord
@@ -333,4 +393,171 @@ func (h *agentHandler) updateRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *agentHandler) uploadRecord(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 id")
+		return
+	}
+	owns, err := h.store.AgentOwnsRecord(r.Context(), agent.ID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !owns {
+		writeError(w, http.StatusForbidden, "record not assigned to agent")
+		return
+	}
+	rec, err := h.store.GetRecord(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到備份紀錄")
+		return
+	}
+	if rec.ProjectID == nil {
+		writeError(w, http.StatusBadRequest, "record missing project")
+		return
+	}
+	proj, err := h.store.GetProject(r.Context(), *rec.ProjectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到專案")
+		return
+	}
+	projectRoot := filepath.Clean(projectNASRoot(proj))
+
+	filename := filepath.Base(strings.TrimSpace(r.Header.Get("X-Backup-Filename")))
+	if filename == "." || filename == string(filepath.Separator) || filename == "" {
+		filename = filepath.Base(rec.Filename)
+	}
+	expected := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Backup-Sha256")))
+	if expected == "" {
+		writeError(w, http.StatusBadRequest, "X-Backup-Sha256 required")
+		return
+	}
+
+	destPath := filepath.Clean(rec.Path)
+	if destPath == "." || destPath == "" {
+		destPath = filepath.Join(projectRoot, rec.Type, filename)
+	} else {
+		destPath = filepath.Join(filepath.Dir(destPath), filename)
+	}
+	if !pathWithinRoot(destPath, projectRoot) {
+		writeError(w, http.StatusBadRequest, "record path escapes project directory")
+		return
+	}
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("建立目標目錄失敗: %v", err))
+		return
+	}
+	tmpPath := destPath + ".uploading"
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("建立上傳檔案失敗: %v", err))
+		return
+	}
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(out, hash), r.Body)
+	closeErr := out.Close()
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if copyErr != nil || closeErr != nil {
+		os.Remove(tmpPath) //nolint
+		if copyErr != nil {
+			writeError(w, http.StatusInternalServerError, "寫入上傳檔案失敗: "+copyErr.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "關閉上傳檔案失敗: "+closeErr.Error())
+		return
+	}
+	if actual != expected {
+		os.Remove(tmpPath) //nolint
+		writeError(w, http.StatusBadRequest, "checksum mismatch")
+		return
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath) //nolint
+		writeError(w, http.StatusInternalServerError, "移動上傳檔案失敗: "+err.Error())
+		return
+	}
+	if err := h.store.UpdateRecordPath(r.Context(), id, filename, destPath, size, actual); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":       destPath,
+		"filename":   filename,
+		"size_bytes": size,
+		"checksum":   actual,
+	})
+}
+
+func (h *agentHandler) downloadRecord(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 id")
+		return
+	}
+	owns, err := h.store.AgentOwnsRecord(r.Context(), agent.ID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !owns {
+		writeError(w, http.StatusForbidden, "record not assigned to agent")
+		return
+	}
+	rec, err := h.store.GetRecord(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到備份紀錄")
+		return
+	}
+	if rec.ProjectID == nil {
+		writeError(w, http.StatusBadRequest, "record missing project")
+		return
+	}
+	proj, err := h.store.GetProject(r.Context(), *rec.ProjectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到專案")
+		return
+	}
+	if rec.Status != "success" {
+		writeError(w, http.StatusBadRequest, "record is not successful")
+		return
+	}
+	projectRoot := filepath.Clean(projectNASRoot(proj))
+	if !pathWithinRoot(rec.Path, projectRoot) {
+		writeError(w, http.StatusBadRequest, "record path escapes project directory")
+		return
+	}
+	f, err := os.Open(rec.Path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "備份檔不存在")
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filepath.Base(rec.Filename), `"`, "")+`"`)
+	w.Header().Set("X-Backup-Sha256", rec.Checksum)
+	http.ServeContent(w, r, filepath.Base(rec.Filename), rec.CreatedAt, f)
+}
+
+func projectNASRoot(proj *store.Project) string {
+	if proj.NasSubpath == "" {
+		return proj.NasBase
+	}
+	return filepath.Join(proj.NasBase, proj.NasSubpath)
+}
+
+func pathWithinRoot(path, root string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanRoot := filepath.Clean(root)
+	return cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator))
 }

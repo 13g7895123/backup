@@ -30,6 +30,7 @@ type IntegratedItem struct {
 // ── handler ───────────────────────────────────────────────────────────────────
 
 type integratedHandler struct {
+	store   *store.Store
 	pool    *pgxpool.Pool
 	runner  *backup.Runner
 	syslogH *syslogHandler
@@ -38,6 +39,7 @@ type integratedHandler struct {
 
 func RegisterIntegratedRoutes(mux *http.ServeMux, s *store.Store, runner *backup.Runner) {
 	h := &integratedHandler{
+		store:   s,
 		pool:    s.Pool(),
 		runner:  runner,
 		syslogH: &syslogHandler{pool: s.Pool()},
@@ -56,10 +58,16 @@ func (h *integratedHandler) listAll(w http.ResponseWriter, r *http.Request) {
 
 	// --- projects ---
 	projRows, err := h.pool.Query(ctx, `
-		SELECT p.id, p.name, COALESCE(s.cron_expression,'') AS cron_expr,
-		       p.enabled
+		SELECT p.id, p.name, COALESCE(s.cron_expr,'') AS cron_expr, p.enabled
 		FROM projects p
-		LEFT JOIN schedules s ON s.project_id = p.id AND s.type = 'all'
+		LEFT JOIN LATERAL (
+			SELECT cron_expr
+			FROM schedules
+			WHERE project_id = p.id
+			  AND 'all' = ANY(target_types)
+			ORDER BY id
+			LIMIT 1
+		) s ON true
 		ORDER BY p.id`)
 	if err == nil {
 		defer projRows.Close()
@@ -125,12 +133,7 @@ func (h *integratedHandler) runAll(w http.ResponseWriter, r *http.Request) {
 		for projRows.Next() {
 			var projID int
 			if err := projRows.Scan(&projID); err == nil {
-				pid := projID
-				go func() {
-					if err := h.runner.RunProject(context.Background(), pid, []string{"all"}, nil, "manual"); err != nil {
-						log.Printf("[run-all/project] id=%d 失敗: %v", pid, err)
-					}
-				}()
+				h.runProject(context.Background(), projID, "all", "[run-all/project]")
 			}
 		}
 	}
@@ -285,12 +288,7 @@ func (h *integratedHandler) batchRun(w http.ResponseWriter, r *http.Request) {
 			}(c)
 
 		case "project":
-			pid := item.ID
-			go func() {
-				if err := h.runner.RunProject(context.Background(), pid, []string{"all"}, nil, "manual"); err != nil {
-					log.Printf("[batch-run/project] id=%d 失敗: %v", pid, err)
-				}
-			}()
+			h.runProject(context.Background(), item.ID, "all", "[batch-run/project]")
 		}
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{
@@ -337,16 +335,15 @@ func (h *integratedHandler) batchSchedule(w http.ResponseWriter, r *http.Request
 		case "project":
 			// 更新或插入排程（type='all'）
 			tag, err := h.pool.Exec(ctx, `
-				UPDATE schedules SET cron_expression=$1, updated_at=NOW()
-				WHERE project_id=$2 AND type='all'`,
+				UPDATE schedules SET cron_expr=$1, updated_at=NOW()
+				WHERE project_id=$2 AND 'all' = ANY(target_types)`,
 				body.CronExpr, item.ID)
 			if err == nil {
 				if tag.RowsAffected() == 0 {
 					// 沒有既有排程，INSERT
 					h.pool.Exec(ctx, //nolint
-						`INSERT INTO schedules (project_id, type, cron_expression)
-						 VALUES ($1, 'all', $2)
-						 ON CONFLICT DO NOTHING`,
+						`INSERT INTO schedules (project_id, label, cron_expr, target_types, enabled)
+						 VALUES ($1, '整合排程', $2, '{all}', true)`,
 						item.ID, body.CronExpr)
 				}
 				updated++
@@ -357,4 +354,37 @@ func (h *integratedHandler) batchSchedule(w http.ResponseWriter, r *http.Request
 		"updated":   updated,
 		"cron_expr": body.CronExpr,
 	})
+}
+
+func (h *integratedHandler) runProject(ctx context.Context, projectID int, targetType string, logPrefix string) {
+	project, err := h.store.GetProject(ctx, projectID)
+	if err != nil {
+		log.Printf("%s id=%d 找不到專案: %v", logPrefix, projectID, err)
+		return
+	}
+	if project.ExecutorType == "agent" {
+		if project.ExecutorAgentID == nil {
+			log.Printf("%s id=%d project 未設定 executor agent", logPrefix, projectID)
+			return
+		}
+		agent, err := h.store.GetAgent(ctx, *project.ExecutorAgentID)
+		if err != nil {
+			log.Printf("%s id=%d 找不到 executor agent: %v", logPrefix, projectID, err)
+			return
+		}
+		if !agent.Enabled {
+			log.Printf("%s id=%d executor agent 未啟用", logPrefix, projectID)
+			return
+		}
+		if err := forwardToAgent(agent.BaseURL, agent.Code, agent.TokenHash, projectID, targetType); err != nil {
+			log.Printf("%s id=%d 轉發 agent 失敗: %v", logPrefix, projectID, err)
+			return
+		}
+		return
+	}
+	go func() {
+		if err := h.runner.RunProject(context.Background(), projectID, []string{targetType}, nil, "manual"); err != nil {
+			log.Printf("%s id=%d 失敗: %v", logPrefix, projectID, err)
+		}
+	}()
 }

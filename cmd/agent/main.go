@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -35,6 +37,7 @@ func main() {
 
 	runner := &backup.Runner{
 		Store:    c,
+		Uploader: c,
 		Notifier: notifier,
 	}
 
@@ -124,6 +127,42 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte(`{"status":"triggered"}`))
+	}))
+
+	// POST /restore {"record_id":1,"strategy":"new|overwrite","target":"/restore/path"}
+	mux.HandleFunc("POST /restore", auth(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RecordID int64  `json:"record_id"`
+			Strategy string `json:"strategy"`
+			Target   string `json:"target"`
+			Confirm  string `json:"confirm"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			return
+		}
+		if req.RecordID == 0 {
+			http.Error(w, `{"error":"record_id required"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Strategy == "" {
+			req.Strategy = "new"
+		}
+		if req.Strategy != "new" && req.Strategy != "overwrite" {
+			http.Error(w, `{"error":"invalid strategy"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Strategy == "overwrite" && req.Confirm != "RESTORE" {
+			http.Error(w, `{"error":"overwrite requires confirm=RESTORE"}`, http.StatusBadRequest)
+			return
+		}
+		result, err := runRestore(r.Context(), c, req.RecordID, req.Strategy, req.Target)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result) //nolint
 	}))
 
 	// GET /healthz
@@ -217,9 +256,9 @@ func main() {
 	}))
 
 	srv := &http.Server{
-		Addr:         agentAddr,
-		Handler:      api.CORSMiddleware(mux),
-		ReadTimeout:  10 * time.Second,
+		Addr:        agentAddr,
+		Handler:     api.CORSMiddleware(mux),
+		ReadTimeout: 10 * time.Second,
 		// Agent 會處理 release build、診斷與 host 任務，回應可能超過 10 秒。
 		WriteTimeout: 10 * time.Minute,
 	}
@@ -238,6 +277,137 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("[agent] 收到關閉訊號，正在停止...")
+}
+
+func runRestore(ctx context.Context, c *client.DashboardClient, recordID int64, strategy, target string) (map[string]any, error) {
+	rec, err := c.GetRecord(ctx, recordID)
+	if err != nil {
+		return nil, err
+	}
+	if rec.ProjectID == nil {
+		return nil, fmt.Errorf("record missing project_id")
+	}
+	project, err := c.GetProject(ctx, *rec.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := c.ListTargets(ctx, *rec.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	var bt *store.BackupTarget
+	if rec.TargetID != nil {
+		for i := range targets {
+			if targets[i].ID == *rec.TargetID {
+				bt = &targets[i]
+				break
+			}
+		}
+	}
+	if bt == nil {
+		return nil, fmt.Errorf("backup target not found")
+	}
+
+	tmpDir := filepath.Join(os.TempDir(), "backup-agent-restore")
+	tmpPath := filepath.Join(tmpDir, fmt.Sprintf("record_%d_%s", recordID, filepath.Base(rec.Filename)))
+	if err := c.DownloadBackup(ctx, recordID, tmpPath); err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmpPath) //nolint
+
+	restoreTarget := target
+	snapshotPath := ""
+	snapshotDir := os.Getenv("BACKUP_AGENT_RESTORE_SNAPSHOT_DIR")
+	if snapshotDir == "" {
+		snapshotDir = filepath.Join(os.TempDir(), "backup-agent-restore-snapshots")
+	}
+	switch rec.Type {
+	case "files", "system":
+		if restoreTarget == "" && strategy == "overwrite" && rec.Type == "files" {
+			var cfg backup.FilesConfig
+			if err := json.Unmarshal(bt.Config, &cfg); err != nil {
+				return nil, err
+			}
+			restoreTarget = cfg.Source
+		}
+		if restoreTarget == "" && strategy == "overwrite" && rec.Type == "system" {
+			restoreTarget = "/"
+		}
+		if strategy == "overwrite" {
+			path, err := backup.SnapshotFiles(restoreTarget, snapshotDir, rec.ProjectName)
+			if err != nil {
+				return nil, fmt.Errorf("overwrite 前 snapshot 失敗: %w", err)
+			}
+			snapshotPath = path
+		}
+		if err := backup.RestoreFiles(tmpPath, backup.RestoreOptions{Strategy: strategy, Target: restoreTarget}); err != nil {
+			return nil, err
+		}
+	case "database":
+		cfg, err := backup.ParseDatabaseConfig(bt.Config)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.ContainerName == "" && cfg.Host == "" {
+			if project.DockerDbContainer != "" {
+				cfg.ContainerName = project.DockerDbContainer
+				if cfg.DBType == "" {
+					cfg.DBType = project.DbType
+				}
+				if cfg.Name == "" {
+					cfg.Name = project.DbName
+				}
+				if cfg.User == "" {
+					cfg.User = project.DbUser
+				}
+				if cfg.PasswordEnv == "" {
+					cfg.PasswordEnv = project.DbPasswordEnv
+				}
+				if cfg.Password == "" {
+					cfg.Password = project.DbPassword
+				}
+			} else if project.DbHost != "" {
+				cfg.Host = project.DbHost
+				cfg.Port = project.DbPort
+				if cfg.DBType == "" {
+					cfg.DBType = project.DbType
+				}
+				if cfg.Name == "" {
+					cfg.Name = project.DbName
+				}
+				if cfg.User == "" {
+					cfg.User = project.DbUser
+				}
+				if cfg.PasswordEnv == "" {
+					cfg.PasswordEnv = project.DbPasswordEnv
+				}
+				if cfg.Password == "" {
+					cfg.Password = project.DbPassword
+				}
+			}
+		}
+		if strategy == "overwrite" {
+			path, err := backup.SnapshotDatabase(cfg, snapshotDir, rec.ProjectName)
+			if err != nil {
+				return nil, fmt.Errorf("overwrite 前 DB snapshot 失敗: %w", err)
+			}
+			snapshotPath = path
+		}
+		if err := backup.RestoreDatabase(tmpPath, cfg, backup.RestoreOptions{Strategy: strategy, Target: restoreTarget}); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported restore type: %s", rec.Type)
+	}
+
+	return map[string]any{
+		"status":        "restored",
+		"record_id":     recordID,
+		"type":          rec.Type,
+		"strategy":      strategy,
+		"target":        restoreTarget,
+		"snapshot_path": snapshotPath,
+	}, nil
 }
 
 func requireEnv(key string) string {

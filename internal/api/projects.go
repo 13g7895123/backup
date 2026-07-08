@@ -178,6 +178,15 @@ func (h *projectHandler) validateProject(ctx context.Context, p *store.Project) 
 	if p.ExecutorType != "local" && p.ExecutorType != "agent" {
 		return &validationError{msg: "executor_type 必須為 local 或 agent"}
 	}
+	if p.TransferMode == "" {
+		p.TransferMode = "direct"
+	}
+	if p.TransferMode != "direct" && p.TransferMode != "upload" {
+		return &validationError{msg: "transfer_mode 必須為 direct 或 upload"}
+	}
+	if p.TransferMode == "upload" && p.ExecutorType != "agent" {
+		return &validationError{msg: "transfer_mode=upload 只支援 agent executor"}
+	}
 	if p.ExecutorType == "agent" {
 		if p.ExecutorAgentID == nil {
 			return &validationError{msg: "executor_agent_id 不可為空"}
@@ -186,12 +195,14 @@ func (h *projectHandler) validateProject(ctx context.Context, p *store.Project) 
 		if err != nil || !agent.Enabled {
 			return &validationError{msg: "指定的 executor agent 不存在或未啟用"}
 		}
-		ok, err := h.store.AgentSupportsProjectNAS(ctx, agent.ID, p.NasTargetID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return &validationError{msg: "指定的 agent 不支援該 NAS target"}
+		if p.TransferMode != "upload" {
+			ok, err := h.store.AgentSupportsProjectNAS(ctx, agent.ID, p.NasTargetID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return &validationError{msg: "指定的 agent 不支援該 NAS target"}
+			}
 		}
 	}
 	return nil

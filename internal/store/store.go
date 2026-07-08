@@ -60,6 +60,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		"018_agent_nas_targets.sql",
 		"019_projects_nas_target.sql",
 		"020_syslog_executor.sql",
+		"021_projects_transfer_mode.sql",
+		"022_restore_records.sql",
 	} {
 		path := "/app/migrations/" + name
 		sql, err := os.ReadFile(path)

@@ -3,10 +3,14 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"backup-manager/internal/store"
@@ -67,6 +71,20 @@ func (c *DashboardClient) do(ctx context.Context, method, path string, body any,
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+func (c *DashboardClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if c.agentCode != "" {
+		req.Header.Set("X-Agent-Code", c.agentCode)
+	}
+	if c.token != "" {
+		req.Header.Set("X-Agent-Token", c.token)
+	}
+	return req, nil
 }
 
 // ── Projects ───────────────────────────────────────────────────────────────
@@ -135,8 +153,79 @@ func (c *DashboardClient) CreateRecord(ctx context.Context, r *store.BackupRecor
 	return out.ID, nil
 }
 
+func (c *DashboardClient) GetRecord(ctx context.Context, id int64) (*store.BackupRecord, error) {
+	var out store.BackupRecord
+	return &out, c.do(ctx, "GET", fmt.Sprintf("/api/agent/records/%d", id), nil, &out)
+}
+
 func (c *DashboardClient) UpdateRecord(ctx context.Context, r *store.BackupRecord) error {
 	return c.do(ctx, "PUT", fmt.Sprintf("/api/agent/records/%d", r.ID), r, nil)
+}
+
+func (c *DashboardClient) UploadBackup(ctx context.Context, recordID int64, filePath, checksum string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	req, err := c.newRequest(ctx, "POST", fmt.Sprintf("/api/agent/records/%d/upload", recordID), f)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Backup-Sha256", checksum)
+	req.Header.Set("X-Backup-Filename", filepath.Base(filePath))
+	if stat, err := f.Stat(); err == nil {
+		req.ContentLength = stat.Size()
+	}
+	streamClient := &http.Client{Timeout: 0}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP POST upload record=%d: %w", recordID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upload record=%d → %d: %s", recordID, resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *DashboardClient) DownloadBackup(ctx context.Context, recordID int64, destPath string) error {
+	req, err := c.newRequest(ctx, "GET", fmt.Sprintf("/api/agent/records/%d/download", recordID), nil)
+	if err != nil {
+		return err
+	}
+	streamClient := &http.Client{Timeout: 0}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP GET download record=%d: %w", recordID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("download record=%d → %d: %s", recordID, resp.StatusCode, string(b))
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
+	out, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, hash), resp.Body); err != nil {
+		os.Remove(destPath) //nolint
+		return err
+	}
+	expected := resp.Header.Get("X-Backup-Sha256")
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if expected != "" && expected != actual {
+		os.Remove(destPath) //nolint
+		return fmt.Errorf("download checksum mismatch: expected=%s actual=%s", expected, actual)
+	}
+	return nil
 }
 
 func (c *DashboardClient) ListRecords(ctx context.Context, f store.ListRecordsFilter) ([]store.BackupRecord, int64, error) {

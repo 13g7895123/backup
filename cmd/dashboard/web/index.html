@@ -275,6 +275,12 @@ function esc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function showPlainError(title, msg) {
+  openModal(title, `
+    <div style="background:var(--danger-bg);border:1px solid var(--danger-border);border-radius:6px;padding:12px 14px;color:var(--danger);font-size:13px;word-break:break-all;white-space:pre-wrap;font-family:monospace">${esc(msg)}</div>
+  `, `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`, true);
+}
+
 function fmtSize(b) {
   if (!b) return '-';
   if (b < 1024) return b + ' B';
@@ -856,12 +862,13 @@ async function renderProjects() {
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>專案名稱</th><th>說明</th><th>執行節點</th><th>專案路徑</th><th>NAS 設定</th><th>資料庫</th><th>狀態</th><th style="text-align:right">操作</th></tr></thead>
+          <thead><tr><th>專案名稱</th><th>說明</th><th>執行節點</th><th>傳輸</th><th>專案路徑</th><th>NAS 設定</th><th>資料庫</th><th>狀態</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${(projects||[]).map(p => `<tr>
-            <td><a href="#" style="font-weight:600;color:var(--primary)" onclick="navigate('project',${p.id});return false">${esc(p.name)}</a></td>
-            <td style="color:var(--text2)">${esc(p.description||'—')}</td>
-            <td><div>${esc(executorLabel(p, agentMap))}</div>${p.executor_type==='agent' && p.executor_agent_id ? `<div style="font-size:12px;color:var(--text2)">${agentStatusBadge(agentMap[p.executor_agent_id] || {})}</div>` : ''}</td>
-            <td><span class="mono truncate">${esc(p.project_path||'—')}</span></td>
+	            <td><a href="#" style="font-weight:600;color:var(--primary)" onclick="navigate('project',${p.id});return false">${esc(p.name)}</a></td>
+	            <td style="color:var(--text2)">${esc(p.description||'—')}</td>
+	            <td><div>${esc(executorLabel(p, agentMap))}</div>${p.executor_type==='agent' && p.executor_agent_id ? `<div style="font-size:12px;color:var(--text2)">${agentStatusBadge(agentMap[p.executor_agent_id] || {})}</div>` : ''}</td>
+	            <td><span class="badge ${p.transfer_mode==='upload'?'badge-info':'badge-off'}">${p.transfer_mode==='upload'?'upload':'direct'}</span></td>
+	            <td><span class="mono truncate">${esc(p.project_path||'—')}</span></td>
             <td><div>${esc(nasLabel(p, nasMap))}</div><div class="mono" style="font-size:12px;color:var(--text2)">${esc(p.nas_base||'—')}</div></td>
             <td>${p.docker_db_container ? `<span class="badge badge-database">🐳 ${esc(p.docker_db_container)}</span>` : p.db_type ? `<span class="badge badge-database">${esc(p.db_type)}@${esc(p.db_host)}</span>` : '<span style="color:var(--text3)">—</span>'}</td>
             <td><span class="badge ${p.enabled?'badge-on':'badge-off'}">${p.enabled?'啟用中':'已停用'}</span></td>
@@ -925,8 +932,9 @@ function projectForm(p = {}, deps = {}) {
   const dbMode = p.docker_db_container ? 'docker' : (p.db_type && !p.docker_db_container ? 'direct' : '');
   const agents = deps.agents || [];
   const nasTargets = deps.nasTargets || [];
-  const executorType = p.executor_type || (agents.length ? 'agent' : 'local');
-  const selectedAgent = p.executor_agent_id || '';
+	  const executorType = p.executor_type || (agents.length ? 'agent' : 'local');
+	  const transferMode = p.transfer_mode || 'direct';
+	  const selectedAgent = p.executor_agent_id || '';
   const selectedNAS = p.nas_target_id || '';
   return `
     <div class="form-group">
@@ -951,13 +959,13 @@ function projectForm(p = {}, deps = {}) {
       <label class="form-label">NAS 備份根目錄</label>
       <input id="f-nas" class="form-input" value="${esc(p.nas_base || (()=>{ const d=nasDefaultsGet(); return d.nasEnabled?d.nasPath:''; })() || '/mnt/nas/backups')}" placeholder="/mnt/nas/backups">
     </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">執行方式</label>
-        <select id="f-executor-type" class="form-input" onchange="toggleProjectExecutorFields(this.value)">
-          <option value="local" ${executorType==='local'?'selected':''}>本機執行</option>
-          <option value="agent" ${executorType==='agent'?'selected':''}>指定 Agent</option>
-        </select>
+	    <div class="form-row">
+	      <div class="form-group">
+	        <label class="form-label">執行方式</label>
+	        <select id="f-executor-type" class="form-input" onchange="toggleProjectExecutorFields(this.value)">
+	          <option value="local" ${executorType==='local'?'selected':''}>本機執行</option>
+	          <option value="agent" ${executorType==='agent'?'selected':''}>指定 Agent</option>
+	        </select>
       </div>
       <div class="form-group" id="f-executor-agent-wrap" style="display:${executorType==='agent'?'block':'none'}">
         <label class="form-label">執行 Agent</label>
@@ -965,9 +973,17 @@ function projectForm(p = {}, deps = {}) {
           <option value="">— 請選擇 —</option>
           ${agents.map(a => `<option value="${a.id}" ${String(selectedAgent)===String(a.id)?'selected':''}>${esc(a.name)} (${esc(a.code)})</option>`).join('')}
         </select>
-      </div>
-    </div>
-    <div class="form-row">
+	      </div>
+	    </div>
+	    <div class="form-group">
+	      <label class="form-label">備份檔傳輸模式</label>
+	      <select id="f-transfer-mode" class="form-input">
+	        <option value="direct" ${transferMode==='direct'?'selected':''}>direct：執行節點直接寫入 NAS</option>
+	        <option value="upload" ${transferMode==='upload'?'selected':''}>upload：Agent 上傳到 Dashboard，由 Dashboard 寫入 NAS</option>
+	      </select>
+	      <div class="form-hint">upload 僅支援「指定 Agent」，適用於 agent VM 無法掛載 NAS 的情境。</div>
+	    </div>
+	    <div class="form-row">
       <div class="form-group">
         <label class="form-label">NAS Target</label>
         <select id="f-nas-target-id" class="form-input">
@@ -1073,9 +1089,10 @@ function toggleProjectExecutorFields(mode) {
 async function submitProject(id = null) {
   const split = s => s.split(',').map(x=>x.trim()).filter(Boolean);
   const dbMode = document.getElementById('f-dbmode').value;
-  const executorType = document.getElementById('f-executor-type').value;
-  const executorAgentID = document.getElementById('f-executor-agent').value;
-  const nasTargetID = document.getElementById('f-nas-target-id').value;
+	  const executorType = document.getElementById('f-executor-type').value;
+	  const executorAgentID = document.getElementById('f-executor-agent').value;
+	  const transferMode = document.getElementById('f-transfer-mode').value;
+	  const nasTargetID = document.getElementById('f-nas-target-id').value;
   const body = {
     name:                document.getElementById('f-name').value.trim(),
     description:         document.getElementById('f-desc').value.trim(),
@@ -1084,9 +1101,10 @@ async function submitProject(id = null) {
     nas_subpath:         document.getElementById('f-nas-subpath').value.trim(),
     project_path:        document.getElementById('f-path').value.trim(),
     backup_dirs:         split(document.getElementById('f-bdirs').value),
-    executor_type:       executorType,
-    executor_agent_id:   executorType === 'agent' && executorAgentID ? parseInt(executorAgentID, 10) : null,
-    enabled:             true,
+	    executor_type:       executorType,
+	    executor_agent_id:   executorType === 'agent' && executorAgentID ? parseInt(executorAgentID, 10) : null,
+	    transfer_mode:       transferMode,
+	    enabled:             true,
     db_type: '', db_host: '', db_port: 0, db_name: '', db_user: '', db_password: '', db_password_env: '', docker_db_container: ''
   };
   if (dbMode === 'docker') {
@@ -1104,8 +1122,9 @@ async function submitProject(id = null) {
     body.db_user         = document.getElementById('f-dbuser').value.trim();
     body.db_password_env = document.getElementById('f-dbpass').value.trim();
   }
-  if (!body.name) { toast('請填寫專案名稱','warning'); return; }
-  if (body.executor_type === 'agent' && !body.executor_agent_id) { toast('請選擇執行 Agent','warning'); return; }
+	  if (!body.name) { toast('請填寫專案名稱','warning'); return; }
+	  if (body.executor_type === 'agent' && !body.executor_agent_id) { toast('請選擇執行 Agent','warning'); return; }
+	  if (body.transfer_mode === 'upload' && body.executor_type !== 'agent') { toast('upload 傳輸模式需使用指定 Agent','warning'); return; }
   try {
     if (id) { await apiPut(`/api/projects/${id}`, body); toast('專案已更新','success'); }
     else { await apiPost('/api/projects', body); toast('專案已建立','success'); }
@@ -1967,12 +1986,15 @@ async function saveRetention(projId) {
 /* ── Project Records Tab ── */
 async function renderProjectRecords(id) {
   try {
-    const [data, proj] = await Promise.all([
-      apiGet(`/api/projects/${id}/backups?limit=30`),
-      apiGet(`/api/projects/${id}`).catch(() => null),
-    ]);
-    const recs = data.records || [];
-    recs.forEach(r => { _recordErrors[r.id] = { msg: r.error_msg, projectId: r.project_id, type: r.type, logRef: r.log_ref, path: r.path, agentName: r.agent_name, runHost: r.run_host }; });
+	    const [data, proj, restoreData] = await Promise.all([
+	      apiGet(`/api/projects/${id}/backups?limit=30`),
+	      apiGet(`/api/projects/${id}`).catch(() => null),
+	      apiGet(`/api/projects/${id}/restores?limit=20`).catch(() => ({records: []})),
+	    ]);
+	    const recs = data.records || [];
+	    const restores = restoreData.records || [];
+	    recs.forEach(r => { _recordErrors[r.id] = { msg: r.error_msg, projectId: r.project_id, type: r.type, filename: r.filename, logRef: r.log_ref, path: r.path, agentName: r.agent_name, runHost: r.run_host }; });
+	    restores.forEach(x => { _restoreErrors[x.id] = x.error_msg || ''; });
     const tc = document.getElementById('tab-content');
     if (!tc) return;
     tc.innerHTML = `
@@ -1995,16 +2017,36 @@ async function renderProjectRecords(id) {
             <td>${fmtDur(r.duration_sec)}</td>
             <td><span class="badge badge-off">${esc(r.triggered_by)}</span></td>
             <td style="font-size:12px;white-space:nowrap">${fmtDate(r.created_at)}</td>
-            <td class="td-actions">
-              ${r.status==='failed'&&r.error_msg ? `<button class="btn btn-xs btn-danger" onclick="showRecordError(${r.id})">檢視原因</button>` : ''}
-              <button class="btn btn-xs btn-secondary" onclick="deleteRecord(${r.id},${id})">刪除</button>
-            </td>
+	            <td class="td-actions">
+	              ${r.status==='failed'&&r.error_msg ? `<button class="btn btn-xs btn-danger" onclick="showRecordError(${r.id})">檢視原因</button>` : ''}
+	              ${r.status==='success' ? `<button class="btn btn-xs btn-success" onclick="showRestoreRecord(${r.id})">還原</button>` : ''}
+	              <button class="btn btn-xs btn-secondary" onclick="deleteRecord(${r.id},${id})">刪除</button>
+	            </td>
           </tr>`).join('')}</tbody>
         </table>
-      </div>`}
-    `;
-  } catch(e) { toast(e.message,'error'); }
-}
+	      </div>`}
+	      <div class="flex-c sg" style="margin-top:18px">
+	        <h2 style="font-size:15px;font-weight:700">還原歷史</h2>
+	      </div>
+	      ${restores.length===0 ? '<div class="empty" style="padding:24px"><div class="empty-icon">↩</div>尚無還原紀錄</div>' : `
+	      <div class="table-wrap">
+	        <table>
+	          <thead><tr><th>類型</th><th>策略</th><th>目標</th><th>狀態</th><th>Snapshot</th><th>錯誤</th><th>開始</th><th>完成</th></tr></thead>
+	          <tbody>${restores.map(x => `<tr>
+	            <td>${typeBadge(x.type)}</td>
+	            <td><span class="badge badge-off">${esc(x.strategy)}</span></td>
+	            <td><span class="mono truncate">${esc(x.target||'—')}</span></td>
+	            <td>${statusBadge(x.status, x.error_msg)}</td>
+	            <td><span class="mono truncate">${esc(x.snapshot_path||'—')}</span></td>
+	            <td>${x.error_msg ? `<button class="btn btn-xs btn-danger" onclick="showRestoreError(${x.id})">檢視</button>` : '—'}</td>
+	            <td style="font-size:12px;white-space:nowrap">${fmtDate(x.started_at)}</td>
+	            <td style="font-size:12px;white-space:nowrap">${fmtDate(x.finished_at)}</td>
+	          </tr>`).join('')}</tbody>
+	        </table>
+	      </div>`}
+	    `;
+	  } catch(e) { toast(e.message,'error'); }
+	}
 
 /* ── Trigger Modal ── */
 function showTrigger(projId) {
@@ -2071,7 +2113,7 @@ async function renderBackups() {
     const curPage = Math.floor(backupFilter.offset / backupFilter.limit) + 1;
 
     // 快取錯誤訊息供 showRecordError 使用
-    recs.forEach(r => { _recordErrors[r.id] = { msg: r.error_msg, projectId: r.project_id, type: r.type, logRef: r.log_ref, path: r.path, agentName: r.agent_name, runHost: r.run_host }; });
+	    recs.forEach(r => { _recordErrors[r.id] = { msg: r.error_msg, projectId: r.project_id, type: r.type, filename: r.filename, logRef: r.log_ref, path: r.path, agentName: r.agent_name, runHost: r.run_host }; });
 
     const projOptions = (projects||[]).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
 
@@ -2112,11 +2154,12 @@ async function renderBackups() {
             <td>${fmtDur(r.duration_sec)}</td>
             <td><span class="badge badge-off">${esc(r.triggered_by||'—')}</span></td>
             <td style="font-size:13px;white-space:nowrap">${fmtDate(r.created_at)}</td>
-            <td class="td-actions">
-              ${r.status==='failed'&&r.error_msg ? `<button class="btn btn-xs btn-danger" onclick="showRecordError(${r.id})">檢視原因</button>` : ''}
-              ${r.status==='failed' ? `<button class="btn btn-xs btn-success" onclick="retryRecord(${r.id})">重試</button>` : ''}
-              <button class="btn btn-xs btn-secondary" onclick="deleteRecord(${r.id})">刪除</button>
-            </td>
+	            <td class="td-actions">
+	              ${r.status==='failed'&&r.error_msg ? `<button class="btn btn-xs btn-danger" onclick="showRecordError(${r.id})">檢視原因</button>` : ''}
+	              ${r.status==='failed' ? `<button class="btn btn-xs btn-success" onclick="retryRecord(${r.id})">重試</button>` : ''}
+	              ${r.status==='success' ? `<button class="btn btn-xs btn-success" onclick="showRestoreRecord(${r.id})">還原</button>` : ''}
+	              <button class="btn btn-xs btn-secondary" onclick="deleteRecord(${r.id})">刪除</button>
+	            </td>
           </tr>`).join('')}</tbody>
         </table>
       </div>
@@ -2148,6 +2191,11 @@ function backupPage(page) {
 
 // 儲存失敗紀錄的錯誤訊息，供 showRecordError 使用
 const _recordErrors = {};
+const _restoreErrors = {};
+
+function showRestoreError(id) {
+  showPlainError('還原失敗原因', _restoreErrors[id] || '(無錯誤訊息)');
+}
 
 function showRecordError(id) {
   const rec = _recordErrors[id];
@@ -2205,6 +2253,56 @@ async function deleteRecord(id, projId = null) {
     if (projId) renderProjectRecords(projId);
     else renderBackups();
   } catch(e) { toast(e.message,'error'); }
+}
+
+function showRestoreRecord(id) {
+  const rec = _recordErrors[id] || {};
+  const targetHint = rec.type === 'database' ? '新資料庫名稱；覆蓋時可留空使用原 DB' : '還原目標路徑；覆蓋時可留空使用原路徑';
+  openModal('還原備份', `
+    <div style="margin-bottom:14px;font-size:13px;color:var(--text2)">
+      <div>檔案：<span class="mono">${esc(rec.filename || '')}</span></div>
+      <div>類型：${typeBadge(rec.type || '')}</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">還原策略</label>
+      <select id="f-restore-strategy" class="form-input" onchange="toggleRestoreConfirm()">
+        <option value="new">new：還原到新位置 / 新資料庫</option>
+        <option value="overwrite">overwrite：覆蓋原位置 / 原資料庫</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">目標</label>
+      <input id="f-restore-target" class="form-input" placeholder="${esc(targetHint)}">
+      <div class="form-hint">${esc(targetHint)}</div>
+    </div>
+    <div class="form-group" id="restore-confirm-wrap" style="display:none">
+      <label class="form-label">覆蓋確認</label>
+      <input id="f-restore-confirm" class="form-input" placeholder="輸入 RESTORE 才能覆蓋">
+      <div class="form-hint" style="color:var(--danger)">overwrite 會覆蓋現有資料，操作前請確認已有額外備份。</div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+    <button class="btn btn-danger" onclick="submitRestoreRecord(${id})">開始還原</button>
+  `, true);
+}
+
+function toggleRestoreConfirm() {
+  const strategy = document.getElementById('f-restore-strategy')?.value || 'new';
+  const wrap = document.getElementById('restore-confirm-wrap');
+  if (wrap) wrap.style.display = strategy === 'overwrite' ? 'block' : 'none';
+}
+
+async function submitRestoreRecord(id) {
+  const strategy = document.getElementById('f-restore-strategy').value;
+  const target = document.getElementById('f-restore-target').value.trim();
+  const confirmText = document.getElementById('f-restore-confirm')?.value.trim() || '';
+  if (strategy === 'new' && !target) { toast('new 策略需填寫目標', 'warning'); return; }
+  if (strategy === 'overwrite' && confirmText !== 'RESTORE') { toast('覆蓋還原需輸入 RESTORE', 'warning'); return; }
+  try {
+    const res = await apiPost('/api/restore', { record_id: id, strategy, target, confirm: confirmText });
+    toast(`還原完成：${res.target || res.type || id}`, 'success');
+    closeModal();
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 /* ═══════════════════════════════════════════════════════════════
