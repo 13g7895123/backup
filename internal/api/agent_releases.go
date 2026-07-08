@@ -67,6 +67,8 @@ type agentReleaseDetail struct {
 
 var releaseVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+var agentReleaseBuildLimiter = make(chan struct{}, 1)
+
 type agentReleaseBuildRequest struct {
 	Version       string              `json:"version"`
 	RegisterAgent *agentConfigPayload `json:"register_agent,omitempty"`
@@ -128,6 +130,16 @@ func (h *releaseHandler) build(w http.ResponseWriter, r *http.Request) {
 	defer closeFn()
 
 	logger.Printf("release build request start version=%s remote=%s user_agent=%q", body.Version, r.RemoteAddr, r.UserAgent())
+
+	releaseFn, err := acquireAgentReleaseBuildSlot(r.Context(), logger, body.Version)
+	if err != nil {
+		writeJSON(w, http.StatusRequestTimeout, map[string]any{
+			"error":   err.Error(),
+			"log_ref": logPath,
+		})
+		return
+	}
+	defer releaseFn()
 
 	var (
 		detail  *agentReleaseDetail
@@ -254,6 +266,16 @@ func HandleAgentReleaseBuildDirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer closeFn()
+
+	releaseFn, err := acquireAgentReleaseBuildSlot(r.Context(), logger, body.Version)
+	if err != nil {
+		writeJSON(w, http.StatusRequestTimeout, map[string]any{
+			"error":   err.Error(),
+			"log_ref": logPath,
+		})
+		return
+	}
+	defer releaseFn()
 
 	detail, err := buildReleaseLocally(r.Context(), envOr("AGENT_RELEASES_DIR", "/var/lib/backup-agent/releases"), body.Version, r, logger, logPath)
 	if err != nil {
@@ -943,4 +965,40 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func acquireAgentReleaseBuildSlot(ctx context.Context, logger *log.Logger, version string) (func(), error) {
+	select {
+	case agentReleaseBuildLimiter <- struct{}{}:
+		if logger != nil {
+			logger.Printf("acquired build slot version=%s", version)
+		}
+		return func() {
+			<-agentReleaseBuildLimiter
+			if logger != nil {
+				logger.Printf("released build slot version=%s", version)
+			}
+		}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("等待前一個 build 完成時請求已取消: %w", ctx.Err())
+	default:
+		if logger != nil {
+			logger.Printf("build slot busy; waiting version=%s", version)
+		}
+	}
+
+	select {
+	case agentReleaseBuildLimiter <- struct{}{}:
+		if logger != nil {
+			logger.Printf("acquired build slot after wait version=%s", version)
+		}
+		return func() {
+			<-agentReleaseBuildLimiter
+			if logger != nil {
+				logger.Printf("released build slot version=%s", version)
+			}
+		}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("等待前一個 build 完成時請求已取消: %w", ctx.Err())
+	}
 }
