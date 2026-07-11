@@ -4347,9 +4347,10 @@ async function loadPostgresAdmin() {
   if (!panel || !projectId) { if(panel) panel.innerHTML='<div class="empty" style="padding:24px">請先選擇 PostgreSQL 專案</div>'; return; }
   panel.innerHTML='<div class="loading"><div class="spinner"></div>讀取資料庫與備份...</div>';
   try {
-    const [dbData, backups] = await Promise.all([
+    const [dbData, backups, diagnose] = await Promise.all([
       apiGet(`/api/projects/${projectId}/postgres/databases`).catch(error=>({databases:[],system_database:'',error:error.message})),
       apiGet(`/api/projects/${projectId}/backups?type=database&status=success&limit=100`).catch(error=>({records:[],error:error.message})),
+      apiGet(`/api/projects/${projectId}/postgres/diagnose`).catch(error=>({error:error.message})),
     ]);
     const names = dbData.databases || [], records = backups.records || [];
     const backupOptions = records.map(r=>`<option value="${r.id}">${esc(r.filename)} · ${fmtDate(r.created_at)}</option>`).join('');
@@ -4372,7 +4373,16 @@ async function loadPostgresAdmin() {
       <hr id="pg-compare" style="border:0;border-top:1px solid var(--border);margin:20px 0">
       <div class="card-title">比較兩個獨立資料庫</div><div class="form-hint" style="margin-bottom:12px">實際讀取兩個資料庫，各自建立暫時 dump 後比較 schema 與 data；不會修改資料庫。</div><div class="form-row"><div class="form-group"><label class="form-label" for="pg-db-diff-left">左側資料庫</label><select id="pg-db-diff-left" class="form-input"><option value="">— 選擇 —</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div><div class="form-group"><label class="form-label" for="pg-db-diff-right">右側資料庫</label><select id="pg-db-diff-right" class="form-input"><option value="">— 選擇 —</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div></div>
       <button class="btn btn-primary" onclick="comparePostgresDatabases()">讀取並比較資料庫</button><div id="pg-db-diff-result"></div>
-      <details style="margin-top:20px"><summary style="cursor:pointer;font-weight:600">進階：直接比較兩份備份檔</summary><div class="form-row" style="margin-top:12px"><div class="form-group"><label class="form-label" for="pg-diff-left">較舊 / 左側</label><select id="pg-diff-left" class="form-input"><option value="">— 選擇 —</option>${backupOptions}</select></div><div class="form-group"><label class="form-label" for="pg-diff-right">較新 / 右側</label><select id="pg-diff-right" class="form-input"><option value="">— 選擇 —</option>${backupOptions}</select></div></div><button class="btn btn-secondary" onclick="comparePostgresBackups()">比較備份檔</button><div id="pg-diff-result"></div></details>`;
+      <details style="margin-top:20px"><summary style="cursor:pointer;font-weight:600">進階：直接比較兩份備份檔</summary><div class="form-row" style="margin-top:12px"><div class="form-group"><label class="form-label" for="pg-diff-left">較舊 / 左側</label><select id="pg-diff-left" class="form-input"><option value="">— 選擇 —</option>${backupOptions}</select></div><div class="form-group"><label class="form-label" for="pg-diff-right">較新 / 右側</label><select id="pg-diff-right" class="form-input"><option value="">— 選擇 —</option>${backupOptions}</select></div></div><button class="btn btn-secondary" onclick="comparePostgresBackups()">比較備份檔</button><div id="pg-diff-result"></div></details>
+      <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+      <div class="card-title">連線診斷</div>
+      <pre class="mono" style="white-space:pre-wrap;max-height:260px;overflow:auto;padding:12px;background:var(--surface2);border-radius:var(--radius)">${esc(JSON.stringify(diagnose,null,2))}</pre>
+      <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between"><span>PostgreSQL 操作 Log</span><button class="btn btn-sm btn-secondary" onclick="loadPostgresLogs()">↺ 重新整理</button></div>
+      <div class="form-row" style="margin-bottom:12px"><div class="form-group"><label class="form-label">結果</label><select id="pg-log-status" class="form-input" onchange="loadPostgresLogs()"><option value="">全部</option><option value="failed">失敗</option><option value="success">成功</option></select></div><div class="form-group"><label class="form-label">顯示筆數</label><select id="pg-log-limit" class="form-input" onchange="loadPostgresLogs()"><option>50</option><option>100</option><option>200</option></select></div></div>
+      <div class="form-hint" style="margin-bottom:10px">記錄最近 500 次操作；服務重啟後清空。內容最多保留 64 KiB，API 不驗證身分。</div>
+      <div id="pg-operation-logs"><div class="loading"><div class="spinner"></div>載入 Log...</div></div>`;
+    loadPostgresLogs();
   } catch(e) { panel.innerHTML=`<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`; }
 }
 
@@ -4385,6 +4395,17 @@ async function previewPostgresBackupApply(){const projectId=document.getElementB
 async function applySelectedPostgresBackup(){const projectId=document.getElementById('pg-project-sel').value,recordId=Number(document.getElementById('pg-apply-backup').value),database=document.getElementById('pg-apply-db').value,btn=document.getElementById('pg-apply-submit-btn');if(btn.dataset.previewKey!==`${recordId}:${database}`){toast('備份或資料庫已變更，請重新預覽','warning');return}const typed=prompt(`套用會修改 ${database}。請輸入完整資料庫名稱確認：`);if(typed!==database)return;btn.disabled=true;try{const res=await apiPost(`/api/projects/${projectId}/postgres/apply-backup`,{record_id:recordId,database,confirm:typed});toast(`已將 ${res.backup} 套用到 ${database}`,'success');resetBackupApplyPreview()}catch(e){toast(e.message,'error');btn.disabled=false}}
 async function comparePostgresBackups(){const left=Number(document.getElementById('pg-diff-left').value),right=Number(document.getElementById('pg-diff-right').value),el=document.getElementById('pg-diff-result');if(!left||!right||left===right){toast('請選擇兩份不同備份','warning');return}el.innerHTML='<div class="loading"><div class="spinner"></div>比較中...</div>';try{const res=await apiPost('/api/backups/compare',{left_record_id:left,right_record_id:right});el.innerHTML=renderSQLDiff(res.diff,'左側備份','右側備份')}catch(e){el.innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
 async function comparePostgresDatabases(){const projectId=document.getElementById('pg-project-sel').value,left=document.getElementById('pg-db-diff-left').value,right=document.getElementById('pg-db-diff-right').value,el=document.getElementById('pg-db-diff-result');if(!left||!right||left===right){toast('請選擇兩個不同資料庫','warning');return}el.innerHTML='<div class="loading"><div class="spinner"></div>讀取兩個資料庫並比較...</div>';try{const res=await apiPost(`/api/projects/${projectId}/postgres/compare`,{left_database:left,right_database:right});el.innerHTML=renderSQLDiff(res.diff,`資料庫：${res.left_database}`,`資料庫：${res.right_database}`)}catch(e){el.innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+
+async function loadPostgresLogs(){
+  const projectId=document.getElementById('pg-project-sel')?.value,el=document.getElementById('pg-operation-logs');
+  if(!projectId||!el)return;
+  const status=document.getElementById('pg-log-status')?.value||'',limit=document.getElementById('pg-log-limit')?.value||'50';
+  el.innerHTML='<div class="loading"><div class="spinner"></div>載入 Log...</div>';
+  try{
+    const data=await apiGet(`/api/projects/${projectId}/postgres/logs?limit=${encodeURIComponent(limit)}&status=${encodeURIComponent(status)}`),logs=data.logs||[];
+    el.innerHTML=logs.length?`<div class="table-wrap"><table><thead><tr><th>時間 / 操作</th><th>結果</th><th>耗時</th><th>內容</th></tr></thead><tbody>${logs.map(x=>`<tr><td><div>${fmtDate(x.created_at)}</div><div class="mono">#${x.id} ${esc(x.operation)}</div><div class="mono" style="font-size:11px">${esc(x.method)} ${esc(x.path)}</div></td><td><span class="badge ${x.success?'badge-success':'badge-danger'}">HTTP ${x.status}</span></td><td>${x.duration_ms} ms</td><td><details><summary style="cursor:pointer">Request / Response${x.truncated?'（已截斷）':''}</summary><div class="form-hint">來源：${esc(x.remote_addr||'—')}</div><div style="font-weight:600;margin-top:8px">Request</div><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto">${esc(x.request_body||'—')}</pre><div style="font-weight:600">Response</div><pre class="mono" style="white-space:pre-wrap;max-height:320px;overflow:auto">${esc(x.response_body||'—')}</pre></details></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">尚無 PostgreSQL 操作 Log</div>';
+  }catch(e){el.innerHTML=`<div class="empty">Log 讀取失敗：${esc(e.message)}</div>`}
+}
 
 function renderSQLDiff(diff,leftLabel,rightLabel){return `<div class="diff-summary"><div class="diff-stat"><b>${diff.left_lines}</b><span>${esc(leftLabel)}有效行</span></div><div class="diff-stat"><b>${diff.right_lines}</b><span>${esc(rightLabel)}有效行</span></div><div class="diff-stat"><b style="color:var(--success)">+${diff.added_lines}</b><span>新增行</span></div><div class="diff-stat"><b style="color:var(--danger)">-${diff.removed_lines}</b><span>移除行</span></div></div>${diff.identical?'<div class="badge badge-success">內容相同</div>':`<div class="form-row"><div class="form-group"><label class="form-label">新增（最多 40 行）</label><div class="sql-preview">${esc((diff.added_sample||[]).join('\n')||'—')}</div></div><div class="form-group"><label class="form-label">移除（最多 40 行）</label><div class="sql-preview">${esc((diff.removed_sample||[]).join('\n')||'—')}</div></div></div>`}`}
 

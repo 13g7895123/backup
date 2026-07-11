@@ -48,17 +48,18 @@ type backupCompareRequest struct {
 
 func RegisterPostgresAdminRoutes(mux *http.ServeMux, s *store.Store) {
 	h := &postgresAdminHandler{store: s}
-	mux.HandleFunc("GET /api/projects/{id}/postgres/databases", h.listDatabases)
-	mux.HandleFunc("GET /api/projects/{id}/postgres/diagnose", h.diagnose)
-	mux.HandleFunc("POST /api/projects/{id}/postgres/databases", h.createDatabase)
-	mux.HandleFunc("DELETE /api/projects/{id}/postgres/databases/{name}", h.deleteDatabase)
-	mux.HandleFunc("POST /api/projects/{id}/postgres/data", h.applyData)
-	mux.HandleFunc("POST /api/projects/{id}/postgres/test-data", h.createTestData)
-	mux.HandleFunc("POST /api/projects/{id}/postgres/compare", h.compareDatabases)
-	mux.HandleFunc("POST /api/projects/{id}/postgres/backup-preview", h.previewBackupToDatabase)
-	mux.HandleFunc("POST /api/projects/{id}/postgres/apply-backup", h.applyBackupToDatabase)
-	mux.HandleFunc("POST /api/backups/compare", h.compareBackups)
-	mux.HandleFunc("GET /api/backups/{bid}/restore-preview", h.restorePreview)
+	mux.HandleFunc("GET /api/projects/{id}/postgres/logs", h.listOperationLogs)
+	mux.HandleFunc("GET /api/projects/{id}/postgres/databases", h.withOperationLog("list_databases", h.listDatabases))
+	mux.HandleFunc("GET /api/projects/{id}/postgres/diagnose", h.withOperationLog("diagnose", h.diagnose))
+	mux.HandleFunc("POST /api/projects/{id}/postgres/databases", h.withOperationLog("create_database", h.createDatabase))
+	mux.HandleFunc("DELETE /api/projects/{id}/postgres/databases/{name}", h.withOperationLog("delete_database", h.deleteDatabase))
+	mux.HandleFunc("POST /api/projects/{id}/postgres/data", h.withOperationLog("apply_data", h.applyData))
+	mux.HandleFunc("POST /api/projects/{id}/postgres/test-data", h.withOperationLog("create_test_data", h.createTestData))
+	mux.HandleFunc("POST /api/projects/{id}/postgres/compare", h.withOperationLog("compare_databases", h.compareDatabases))
+	mux.HandleFunc("POST /api/projects/{id}/postgres/backup-preview", h.withOperationLog("preview_backup", h.previewBackupToDatabase))
+	mux.HandleFunc("POST /api/projects/{id}/postgres/apply-backup", h.withOperationLog("apply_backup", h.applyBackupToDatabase))
+	mux.HandleFunc("POST /api/backups/compare", h.withOperationLog("compare_backups", h.compareBackups))
+	mux.HandleFunc("GET /api/backups/{bid}/restore-preview", h.withOperationLog("restore_preview", h.restorePreview))
 }
 
 func (h *postgresAdminHandler) createTestData(w http.ResponseWriter, r *http.Request) {
