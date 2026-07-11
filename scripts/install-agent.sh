@@ -26,6 +26,7 @@ if [[ ! -f "$SERVICE_SRC" ]]; then
   SERVICE_SRC="${ROOT_DIR}/scripts/backup-agent.service"
 fi
 SERVICE_DST="/etc/systemd/system/backup-agent.service"
+SERVICE_NAME="backup-agent"
 
 # ── 確認 binary 已編譯 ────────────────────────────────────────────
 if [[ ! -f "$BINARY_SRC" ]]; then
@@ -35,6 +36,15 @@ if [[ ! -f "$BINARY_SRC" ]]; then
 fi
 
 # ── 安裝 binary ───────────────────────────────────────────────────
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1; then
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+      echo "[install] 停止既有服務：${SERVICE_NAME}"
+      systemctl stop "${SERVICE_NAME}"
+    fi
+  fi
+fi
+
 echo "[install] 複製 binary → $BINARY_DST"
 cp "$BINARY_SRC" "$BINARY_DST"
 chmod 755 "$BINARY_DST"
@@ -96,11 +106,11 @@ fi
 echo "[install] 安裝 systemd service → $SERVICE_DST"
 cp "$SERVICE_SRC" "$SERVICE_DST"
 systemctl daemon-reload
-systemctl enable backup-agent
-systemctl restart backup-agent
+systemctl enable "${SERVICE_NAME}"
+systemctl restart "${SERVICE_NAME}"
 
 echo ""
 echo "[install] 完成！"
-echo "  狀態：systemctl status backup-agent"
-echo "  日誌：journalctl -fu backup-agent"
+echo "  狀態：systemctl status ${SERVICE_NAME}"
+echo "  日誌：journalctl -fu ${SERVICE_NAME}"
 echo "  設定：$ENV_FILE"
