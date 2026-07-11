@@ -121,6 +121,17 @@ func CompareSQLGzipFiles(leftPath, rightPath string) (*SQLDiff, error) {
 	return &SQLDiff{LeftLines: len(left), RightLines: len(right), AddedLines: len(added), RemovedLines: len(removed), AddedSample: sampleLines(added, 40), RemovedSample: sampleLines(removed, 40), Identical: len(added) == 0 && len(removed) == 0}, nil
 }
 
+func ValidateSQLGzip(path string) error {
+	lines, err := normalizedSQLLines(path)
+	if err != nil {
+		return err
+	}
+	if len(lines) == 0 {
+		return fmt.Errorf("備份檔沒有可用的 SQL 內容")
+	}
+	return nil
+}
+
 func requirePostgres(cfg *DatabaseConfig) error {
 	if cfg == nil {
 		return fmt.Errorf("database config required")

@@ -187,6 +187,15 @@ func (h *postgresAdminHandler) previewBackupToDatabase(w http.ResponseWriter, r 
 	if !ok {
 		return
 	}
+	rec, err := h.validProjectDatabaseRecord(r, p, req.RecordID)
+	if err != nil {
+		writePostgresStageError(w, http.StatusUnprocessableEntity, "backup_record", err)
+		return
+	}
+	if err := backup.ValidateSQLGzip(rec.Path); err != nil {
+		writePostgresStageError(w, http.StatusUnprocessableEntity, "nas_backup", fmt.Errorf("備份檔無法讀取或不是有效的 .sql.gz: %w", err))
+		return
+	}
 	tmpDir, err := os.MkdirTemp("", "backup-apply-preview-*")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -197,20 +206,19 @@ func (h *postgresAdminHandler) previewBackupToDatabase(w http.ResponseWriter, r 
 	targetCfg.Name = req.Database
 	currentPath, err := backup.SnapshotDatabase(&targetCfg, tmpDir, "current_"+req.Database)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "讀取目標資料庫失敗: "+err.Error())
-		return
-	}
-	rec, err := h.validProjectDatabaseRecord(r, p, req.RecordID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writePostgresStageError(w, http.StatusBadGateway, "target_database", fmt.Errorf("讀取目標資料庫失敗: %w", err))
 		return
 	}
 	diff, err := backup.CompareSQLGzipFiles(currentPath, rec.Path)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "讀取 NAS 備份失敗: "+err.Error())
+		writePostgresStageError(w, http.StatusUnprocessableEntity, "compare", fmt.Errorf("比較 SQL 內容失敗: %w", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"database": req.Database, "record_id": rec.ID, "backup": filepath.Base(rec.Path), "diff": diff})
+}
+
+func writePostgresStageError(w http.ResponseWriter, status int, stage string, err error) {
+	writeJSON(w, status, map[string]any{"error": err.Error(), "stage": stage})
 }
 
 func (h *postgresAdminHandler) applyBackupToDatabase(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +233,10 @@ func (h *postgresAdminHandler) applyBackupToDatabase(w http.ResponseWriter, r *h
 	rec, err := h.validProjectDatabaseRecord(r, p, req.RecordID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := backup.ValidateSQLGzip(rec.Path); err != nil {
+		writePostgresStageError(w, http.StatusUnprocessableEntity, "nas_backup", fmt.Errorf("備份檔無法讀取或不是有效的 .sql.gz: %w", err))
 		return
 	}
 	snapshotDir := os.Getenv("DASHBOARD_RESTORE_SNAPSHOT_DIR")
@@ -306,6 +318,17 @@ func (h *postgresAdminHandler) validProjectDatabaseRecord(r *http.Request, proje
 	}
 	if rec.Type != "database" || rec.Status != "success" {
 		return nil, fmt.Errorf("只能套用成功的資料庫備份")
+	}
+	if rec.TargetID == nil {
+		return nil, fmt.Errorf("備份紀錄缺少 target")
+	}
+	target, err := h.store.GetTarget(r.Context(), *rec.TargetID)
+	if err != nil {
+		return nil, fmt.Errorf("找不到備份 target")
+	}
+	targetCfg, err := backup.ParseDatabaseConfig(target.Config)
+	if err != nil || targetCfg.DBType != "postgres" {
+		return nil, fmt.Errorf("只能套用 PostgreSQL 備份")
 	}
 	rec.Path = h.dashboardRecordPath(r.Context(), project, rec)
 	return rec, nil

@@ -45,6 +45,13 @@ func TestCompareSQLGzipFiles(t *testing.T) {
 	}
 }
 
+func TestValidateSQLGzipRejectsEmptyDump(t *testing.T) {
+	path := writeTestGzip(t, t.TempDir(), "empty.sql.gz", "-- comments only\n")
+	if err := ValidateSQLGzip(path); err == nil {
+		t.Fatal("expected empty SQL dump to be rejected")
+	}
+}
+
 func writeTestGzip(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
