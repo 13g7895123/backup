@@ -59,11 +59,16 @@ type agentInstallPayload struct {
 	AgentConfig      agentConfigPayload  `json:"agent_config"`
 	Release          *agentReleaseDetail `json:"release,omitempty"`
 	InstallCommand   string              `json:"install_command,omitempty"`
+	ProcessCommand   string              `json:"process_command,omitempty"`
 	ApplyCommand     string              `json:"apply_command,omitempty"`
 	RestartCommand   string              `json:"restart_command,omitempty"`
 	DownloadURL      string              `json:"download_url,omitempty"`
 	ChecksumURL      string              `json:"checksum_url,omitempty"`
 	InstallScriptURL string              `json:"install_script_url,omitempty"`
+	ConfigContent    string              `json:"config_content,omitempty"`
+	InstallScript    string              `json:"install_script,omitempty"`
+	ServiceContent   string              `json:"service_content,omitempty"`
+	DiagnoseScript   string              `json:"diagnose_script,omitempty"`
 }
 
 func (h *agentsHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +288,7 @@ func (h *agentsHandler) getInstaller(w http.ResponseWriter, r *http.Request) {
 		AgentConfig:    cfg,
 		ApplyCommand:   cfg.ApplyCommand,
 		RestartCommand: cfg.RestartCommand,
+		ConfigContent:  cfg.EnvContent,
 	}
 
 	release, err := latestAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), r)
@@ -291,10 +297,14 @@ func (h *agentsHandler) getInstaller(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.Release = release
-	payload.InstallCommand = buildDebianInstallCommand(release, cfg)
+	payload.ProcessCommand = buildDebianProcessCommand(release, cfg)
+	payload.InstallCommand = payload.ProcessCommand
 	payload.DownloadURL = releaseAssetURL(release, ".tar.gz")
 	payload.ChecksumURL = releaseAssetURL(release, "_checksums.txt")
 	payload.InstallScriptURL = releaseAssetURL(release, "install-agent.sh")
+	payload.InstallScript = readReleaseTextAsset(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), release.Version, "install-agent.sh")
+	payload.ServiceContent = readReleaseTextAsset(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), release.Version, "backup-agent.service")
+	payload.DiagnoseScript = readReleaseTextAsset(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), release.Version, "diagnose-agent.sh")
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -453,9 +463,12 @@ SLACK_WEBHOOK_URL=%s
 
 func buildAgentApplyCommand(envContent string) string {
 	return strings.TrimSpace(fmt.Sprintf(`
-sudo install -d -m 755 /etc/backup-agent
-sudo tee /etc/backup-agent/env >/dev/null <<'EOF'
+tmpenv="$(mktemp)"
+cat >"$tmpenv" <<'EOF'
 %sEOF
+sudo install -d -m 755 /etc/backup-agent
+sudo install -m 600 "$tmpenv" /etc/backup-agent/env
+rm -f "$tmpenv"
 sudo systemctl daemon-reload
 sudo systemctl restart backup-agent
 sudo systemctl status backup-agent --no-pager
@@ -515,6 +528,10 @@ func releaseAssetURL(rel *agentReleaseDetail, suffix string) string {
 }
 
 func buildDebianInstallCommand(rel *agentReleaseDetail, cfg agentConfigPayload) string {
+	return buildDebianProcessCommand(rel, cfg)
+}
+
+func buildDebianProcessCommand(rel *agentReleaseDetail, cfg agentConfigPayload) string {
 	if rel == nil {
 		return ""
 	}
@@ -525,15 +542,39 @@ func buildDebianInstallCommand(rel *agentReleaseDetail, cfg agentConfigPayload) 
 	tarName := filepath.Base(tarURL)
 	extractDir := strings.TrimSuffix(tarName, ".tar.gz")
 	return strings.TrimSpace(fmt.Sprintf(`
+sudo apt-get update
+sudo apt-get install -y curl tar ca-certificates
 tmpdir="$(mktemp -d)" && cd "$tmpdir"
-curl -fsSLO %s
+curl -fsSLo %s %s
 tar -xzf %s
 cd %s
-sudo install -d -m 755 /etc/backup-agent
-sudo tee /etc/backup-agent/env >/dev/null <<'EOF'
+tmpenv="$(mktemp)"
+cat >"$tmpenv" <<'EOF'
 %sEOF
+sudo install -d -m 755 /etc/backup-agent
+sudo install -m 600 "$tmpenv" /etc/backup-agent/env
+rm -f "$tmpenv"
 sudo AGENT_BINARY_SRC=./backup-agent-linux-amd64 ./install-agent.sh
-`, tarURL, tarName, extractDir, cfg.EnvContent))
+`, shQuote(tarName), shQuote(tarURL), shQuote(tarName), shQuote(extractDir), cfg.EnvContent))
+}
+
+func readReleaseTextAsset(rootDir, version, fileName string) string {
+	if strings.TrimSpace(rootDir) == "" || strings.TrimSpace(version) == "" || strings.TrimSpace(fileName) == "" {
+		return ""
+	}
+	path := filepath.Join(rootDir, version, filepath.Base(fileName))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func shQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func previewToken(token string) string {
