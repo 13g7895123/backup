@@ -1197,13 +1197,30 @@ func downloadAgentReleaseFile(ctx context.Context, agent *store.Agent, version, 
 }
 
 func baseURL(r *http.Request) string {
+	if publicBase := strings.TrimSpace(os.Getenv("DASHBOARD_PUBLIC_URL")); publicBase != "" {
+		return strings.TrimRight(publicBase, "/")
+	}
+	if publicBase := strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")); publicBase != "" {
+		return strings.TrimRight(publicBase, "/")
+	}
+	if r == nil {
+		return ""
+	}
+
 	scheme := "http"
 	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto != "" {
-		scheme = proto
+		scheme = strings.Split(proto, ",")[0]
 	} else if r.TLS != nil {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host
+
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	} else {
+		host = strings.Split(host, ",")[0]
+	}
+	return scheme + "://" + strings.TrimSpace(host)
 }
 
 func envOr(key, fallback string) string {
