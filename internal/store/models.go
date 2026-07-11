@@ -557,6 +557,37 @@ func (s *Store) GetRecord(ctx context.Context, id int64) (*BackupRecord, error) 
 	return &r, nil
 }
 
+// GetPreviousSuccessfulRecord returns the latest successful backup from the same
+// project, target and type that was created before the selected record.
+func (s *Store) GetPreviousSuccessfulRecord(ctx context.Context, record *BackupRecord) (*BackupRecord, error) {
+	if record == nil || record.ProjectID == nil || record.TargetID == nil {
+		return nil, fmt.Errorf("record missing project or target")
+	}
+	var r BackupRecord
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, project_id, project_name, target_id, schedule_id, type, sub_type,
+		       label, filename, path, size_bytes,
+		       ROUND(size_bytes::numeric/1024/1024, 2),
+		       COALESCE(checksum,''), status, COALESCE(duration_sec,0),
+		       COALESCE(error_msg,''), agent_id, COALESCE(agent_name,''), COALESCE(run_host,''), COALESCE(log_ref,''),
+		       triggered_by, retained_until, created_at
+		FROM backup_records
+		WHERE project_id=$1 AND target_id=$2 AND type=$3 AND status='success'
+		  AND (created_at < $4 OR (created_at = $4 AND id < $5))
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, *record.ProjectID, *record.TargetID, record.Type, record.CreatedAt, record.ID).
+		Scan(&r.ID, &r.ProjectID, &r.ProjectName, &r.TargetID,
+			&r.ScheduleID, &r.Type, &r.SubType, &r.Label,
+			&r.Filename, &r.Path, &r.SizeBytes, &r.SizeMB,
+			&r.Checksum, &r.Status, &r.DurationSec, &r.ErrorMsg,
+			&r.AgentID, &r.AgentName, &r.RunHost, &r.LogRef,
+			&r.TriggeredBy, &r.RetainedUntil, &r.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 func (s *Store) CreateRecord(ctx context.Context, r *BackupRecord) (int64, error) {
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO backup_records

@@ -65,6 +65,7 @@ func main() {
 	api.RegisterRecordRoutes(mux, s)
 	api.RegisterTriggerRoute(mux, s, runner)
 	api.RegisterRestoreRoute(mux, s)
+	api.RegisterPostgresAdminRoutes(mux, s)
 	api.RegisterSummaryRoute(mux, s)
 	api.RegisterAgentRoutes(mux, s)
 	api.RegisterAgentCommandRoutes(mux, s)

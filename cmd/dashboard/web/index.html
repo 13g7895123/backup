@@ -116,6 +116,15 @@ textarea.form-input{resize:vertical;min-height:72px}
 .tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:18px;overflow-x:auto}
 .tab{padding:10px 16px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-size:15px;white-space:nowrap}
 .tab:hover{color:var(--text)}.tab.active{color:var(--primary);border-bottom-color:var(--primary)}
+.admin-tabs{position:sticky;top:0;z-index:20;background:var(--bg);padding-top:4px}
+.admin-tabs .tab{min-height:44px;border:0;border-bottom:2px solid transparent;background:transparent;font:inherit}
+.admin-tabs .tab:focus-visible{outline:2px solid var(--primary);outline-offset:-3px;border-radius:4px}
+.admin-tab-panel[hidden]{display:none!important}
+.diff-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}
+.diff-stat{padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}
+.diff-stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}.diff-stat span{font-size:12px;color:var(--text2)}
+.sql-preview{max-height:220px;overflow:auto;padding:12px;background:#172033;color:#e2e8f0;border-radius:6px;font:12px/1.55 monospace;white-space:pre-wrap;word-break:break-word}
+@media(max-width:640px){.diff-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 /* Page header */
 .page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap;gap:10px}
 .page-hdr-left h1{font-size:22px;font-weight:700}.page-hdr-left p{font-size:14px;color:var(--text2);margin-top:3px}
@@ -2308,10 +2317,24 @@ function showRestoreRecord(id) {
       <input id="f-restore-confirm" class="form-input" placeholder="輸入 RESTORE 才能覆蓋">
       <div class="form-hint" style="color:var(--danger)">overwrite 會覆蓋現有資料，操作前請確認已有額外備份。</div>
     </div>
+    ${rec.type === 'database' ? `<div class="form-group"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><label class="form-label" style="margin:0">還原前差異確認</label><button type="button" class="btn btn-sm btn-secondary" onclick="loadRestorePreview(${id})">重新比較</button></div><div class="form-hint">比較上一次成功備份與本次準備還原的備份；不會連線或修改資料庫。</div><div id="restore-diff-preview"><div class="loading"><div class="spinner"></div>讀取兩份備份並比較...</div></div></div>` : ''}
   `, `
     <button class="btn btn-secondary" onclick="closeModal()">取消</button>
     <button class="btn btn-danger" onclick="submitRestoreRecord(${id})">開始還原</button>
   `, true);
+  if (rec.type === 'database') loadRestorePreview(id);
+}
+
+async function loadRestorePreview(id) {
+  const el = document.getElementById('restore-diff-preview');
+  if (!el) return;
+  el.innerHTML='<div class="loading"><div class="spinner"></div>讀取兩份備份並比較...</div>';
+  try {
+    const res = await apiGet(`/api/backups/${id}/restore-preview`);
+    el.innerHTML=renderSQLDiff(res.diff,`上次：${res.previous}`,`本次：${res.backup}`);
+  } catch(e) {
+    el.innerHTML=`<div style="margin-top:10px;padding:10px 12px;border:1px solid var(--danger-border);background:var(--danger-bg);color:var(--danger);border-radius:6px;font-size:13px">無法比較上次備份：${esc(e.message)}<br>仍可在確認風險後執行還原。</div>`;
+  }
 }
 
 function toggleRestoreConfirm() {
@@ -3979,6 +4002,21 @@ function renderAdmin() {
         <p>管理與維護功能</p>
       </div>
     </div>
+    <div id="admin-tabs" class="tabs admin-tabs" role="tablist" aria-label="系統管理功能"></div>
+    <div class="card sg" data-admin-tab="PostgreSQL">
+      <div class="card-title">PostgreSQL 管理</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px">建立或刪除專案資料庫、匯入受控資料，以及比較兩份 PostgreSQL 備份。</div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="pg-project-sel">PostgreSQL 專案</label>
+          <select id="pg-project-sel" class="form-input" onchange="loadPostgresAdmin()"><option value="">— 請選擇 —</option></select>
+        </div>
+        <div class="form-group" style="margin:0;display:flex;align-items:flex-end">
+          <button class="btn btn-secondary" onclick="loadPostgresAdmin()">重新整理</button>
+        </div>
+      </div>
+      <div id="pg-admin-panel"><div class="empty" style="padding:24px">請先選擇 PostgreSQL 專案</div></div>
+    </div>
     <div class="card sg">
       <div class="card-title">Agent 管理</div>
       <div style="font-size:13px;color:var(--text2);margin-bottom:14px">查看 agent 狀態、版本與最後心跳，並手動執行 preflight test。</div>
@@ -4223,6 +4261,7 @@ function renderAdmin() {
       </div>
     </div>
   `);
+  initAdminTabs();
   loadAdminAgents();
   loadAgentCommands();
   loadAgentReleaseCapability();
@@ -4241,6 +4280,13 @@ function renderAdmin() {
       o.textContent = p.name;
       sel.appendChild(o);
     });
+    const pgSel = document.getElementById('pg-project-sel');
+    (projects || []).filter(p => p.db_type === 'postgres').forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = `${p.name}${p.executor_type === 'agent' ? '（Agent，唯讀提示）' : ''}`;
+      pgSel?.appendChild(o);
+    });
   }).catch(() => {});
   // 載入系統日誌下拉
   apiGet('/api/syslogs').then(syslogs => {
@@ -4254,6 +4300,87 @@ function renderAdmin() {
     });
   }).catch(() => {});
 }
+
+function initAdminTabs() {
+  const tabs = document.getElementById('admin-tabs');
+  if (!tabs) return;
+  const panels = [...document.querySelectorAll('#content > .card.sg')];
+  panels.forEach((panel, index) => {
+    panel.classList.add('admin-tab-panel');
+    panel.id = `admin-panel-${index}`;
+    panel.setAttribute('role', 'tabpanel');
+    const title = panel.dataset.adminTab || panel.querySelector('.card-title')?.textContent.trim() || `功能 ${index+1}`;
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'tab'; btn.id = `admin-tab-${index}`;
+    btn.setAttribute('role','tab'); btn.setAttribute('aria-controls',panel.id);
+    btn.textContent = title;
+    btn.onclick = () => selectAdminTab(index, true);
+    btn.onkeydown = e => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + panels.length) % panels.length;
+      selectAdminTab(next, true); document.getElementById(`admin-tab-${next}`)?.focus();
+    };
+    tabs.appendChild(btn);
+  });
+  selectAdminTab(Math.max(0, Math.min(Number(sessionStorage.getItem('adminTab') || 0), panels.length-1)), false);
+}
+
+function selectAdminTab(index, remember) {
+  const panels = [...document.querySelectorAll('#content > .admin-tab-panel')];
+  panels.forEach((panel, i) => {
+    const active = i === index;
+    panel.hidden = !active;
+    document.getElementById(`admin-tab-${i}`)?.classList.toggle('active', active);
+    document.getElementById(`admin-tab-${i}`)?.setAttribute('aria-selected', String(active));
+    document.getElementById(`admin-tab-${i}`)?.setAttribute('tabindex', active ? '0' : '-1');
+  });
+  if (remember) sessionStorage.setItem('adminTab', String(index));
+}
+
+async function loadPostgresAdmin() {
+  const projectId = document.getElementById('pg-project-sel')?.value;
+  const panel = document.getElementById('pg-admin-panel');
+  if (!panel || !projectId) { if(panel) panel.innerHTML='<div class="empty" style="padding:24px">請先選擇 PostgreSQL 專案</div>'; return; }
+  panel.innerHTML='<div class="loading"><div class="spinner"></div>讀取資料庫與備份...</div>';
+  try {
+    const [dbData, backups] = await Promise.all([
+      apiGet(`/api/projects/${projectId}/postgres/databases`),
+      apiGet(`/api/projects/${projectId}/backups?type=database&status=success&limit=100`).catch(()=>({records:[]})),
+    ]);
+    const names = dbData.databases || [], records = backups.records || [];
+    const backupOptions = records.map(r=>`<option value="${r.id}">${esc(r.filename)} · ${fmtDate(r.created_at)}</option>`).join('');
+    panel.innerHTML=`
+      <div class="tabs" role="tablist" aria-label="PostgreSQL 操作"><button class="tab active" type="button">資料庫與資料</button><button class="tab" type="button" onclick="document.getElementById('pg-compare').scrollIntoView({behavior:'smooth'})">備份差異</button></div>
+      <div class="table-wrap"><table><thead><tr><th>資料庫</th><th>狀態</th><th style="text-align:right">操作</th></tr></thead><tbody>
+        ${names.map(n=>`<tr><td class="mono"><strong>${esc(n)}</strong></td><td>${n===dbData.configured_database?'<span class="badge badge-success">專案預設</span>':'<span class="badge">可用</span>'}</td><td class="td-actions">${['postgres','template0','template1'].includes(n)?'':`<button class="btn btn-xs btn-danger" onclick="deletePostgresDatabase('${esc(n)}')">刪除</button>`}</td></tr>`).join('') || '<tr><td colspan="3">尚無資料庫</td></tr>'}
+      </tbody></table></div>
+      <div class="form-row" style="margin-top:16px"><div class="form-group"><label class="form-label" for="pg-new-name">建立資料庫</label><input id="pg-new-name" class="form-input mono" placeholder="例如 app_staging"><div class="form-hint">只允許英文字母、數字與底線。</div></div><div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="createPostgresDatabase()">建立資料庫</button></div></div>
+      <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+      <div class="card-title">插入資料</div><div class="form-row"><div class="form-group"><label class="form-label" for="pg-data-db">目標資料庫</label><select id="pg-data-db" class="form-input">${names.map(n=>`<option ${n===dbData.configured_database?'selected':''}>${esc(n)}</option>`).join('')}</select></div></div>
+      <div class="form-group"><label class="form-label" for="pg-data-sql">SQL（僅 CREATE TABLE / INSERT INTO）</label><textarea id="pg-data-sql" class="form-input mono" rows="8" placeholder="CREATE TABLE IF NOT EXISTS example (...);&#10;INSERT INTO example (...) VALUES (...);"></textarea><div class="form-hint">最大 1 MiB；整批在單一 transaction 執行，任一語句失敗會全部回滾。</div></div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn btn-primary" onclick="applyPostgresData()">檢查並插入資料</button></div>
+      <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+      <div class="card-title">從 NAS 備份套用到資料庫</div><div class="form-hint" style="margin-bottom:12px">選單只顯示此專案已有成功紀錄的資料庫備份，不需要重新上傳檔案。請先預覽差異，再套用到獨立測試資料庫。</div>
+      <div class="form-row"><div class="form-group"><label class="form-label" for="pg-apply-backup">備份檔案</label><select id="pg-apply-backup" class="form-input" onchange="resetBackupApplyPreview()"><option value="">— 選擇 NAS 備份 —</option>${backupOptions}</select></div><div class="form-group"><label class="form-label" for="pg-apply-db">目標測試資料庫</label><select id="pg-apply-db" class="form-input" onchange="resetBackupApplyPreview()"><option value="">— 選擇資料庫 —</option>${names.filter(n=>!['postgres','template0','template1',dbData.configured_database].includes(n)).map(n=>`<option>${esc(n)}</option>`).join('')}</select><div class="form-hint">系統 DB、template 與專案預設 DB 不列入可套用目標。</div></div></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button id="pg-apply-preview-btn" class="btn btn-secondary" onclick="previewPostgresBackupApply()">預覽套用差異</button><button id="pg-apply-submit-btn" class="btn btn-danger" onclick="applySelectedPostgresBackup()" disabled>確認並套用</button></div><div id="pg-apply-result" aria-live="polite"></div>
+      <hr id="pg-compare" style="border:0;border-top:1px solid var(--border);margin:20px 0">
+      <div class="card-title">比較兩個獨立資料庫</div><div class="form-hint" style="margin-bottom:12px">實際讀取兩個資料庫，各自建立暫時 dump 後比較 schema 與 data；不會修改資料庫。</div><div class="form-row"><div class="form-group"><label class="form-label" for="pg-db-diff-left">左側資料庫</label><select id="pg-db-diff-left" class="form-input"><option value="">— 選擇 —</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div><div class="form-group"><label class="form-label" for="pg-db-diff-right">右側資料庫</label><select id="pg-db-diff-right" class="form-input"><option value="">— 選擇 —</option>${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div></div>
+      <button class="btn btn-primary" onclick="comparePostgresDatabases()">讀取並比較資料庫</button><div id="pg-db-diff-result"></div>
+      <details style="margin-top:20px"><summary style="cursor:pointer;font-weight:600">進階：直接比較兩份備份檔</summary><div class="form-row" style="margin-top:12px"><div class="form-group"><label class="form-label" for="pg-diff-left">較舊 / 左側</label><select id="pg-diff-left" class="form-input"><option value="">— 選擇 —</option>${backupOptions}</select></div><div class="form-group"><label class="form-label" for="pg-diff-right">較新 / 右側</label><select id="pg-diff-right" class="form-input"><option value="">— 選擇 —</option>${backupOptions}</select></div></div><button class="btn btn-secondary" onclick="comparePostgresBackups()">比較備份檔</button><div id="pg-diff-result"></div></details>`;
+  } catch(e) { panel.innerHTML=`<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`; }
+}
+
+async function createPostgresDatabase(){const projectId=document.getElementById('pg-project-sel').value,name=document.getElementById('pg-new-name').value.trim();if(!name){toast('請輸入資料庫名稱','warning');return}try{await apiPost(`/api/projects/${projectId}/postgres/databases`,{name});toast(`已建立 ${name}`,'success');loadPostgresAdmin()}catch(e){toast(e.message,'error')}}
+async function deletePostgresDatabase(name){const projectId=document.getElementById('pg-project-sel').value,confirmName=prompt(`刪除資料庫會永久移除所有資料。請輸入完整名稱 ${name} 確認：`);if(confirmName!==name)return;try{await api('DELETE',`/api/projects/${projectId}/postgres/databases/${encodeURIComponent(name)}`,{confirm:confirmName});toast(`已刪除 ${name}`,'success');loadPostgresAdmin()}catch(e){toast(e.message,'error')}}
+async function applyPostgresData(){const projectId=document.getElementById('pg-project-sel').value,database=document.getElementById('pg-data-db').value,sql=document.getElementById('pg-data-sql').value;if(!sql.trim()){toast('請輸入 SQL','warning');return}if(!confirm(`確定要將資料插入 ${database}？系統會以 transaction 執行。`))return;try{await apiPost(`/api/projects/${projectId}/postgres/data`,{database,sql,confirm:'APPLY'});toast('資料插入完成','success')}catch(e){toast(e.message,'error')}}
+function resetBackupApplyPreview(){const btn=document.getElementById('pg-apply-submit-btn'),el=document.getElementById('pg-apply-result');if(btn){btn.disabled=true;delete btn.dataset.previewKey}if(el)el.innerHTML=''}
+async function previewPostgresBackupApply(){const projectId=document.getElementById('pg-project-sel').value,recordId=Number(document.getElementById('pg-apply-backup').value),database=document.getElementById('pg-apply-db').value,el=document.getElementById('pg-apply-result'),btn=document.getElementById('pg-apply-submit-btn');if(!recordId||!database){toast('請選擇備份檔案與目標測試資料庫','warning');return}btn.disabled=true;el.innerHTML='<div class="loading"><div class="spinner"></div>讀取 NAS 備份與目標資料庫...</div>';try{const res=await apiPost(`/api/projects/${projectId}/postgres/backup-preview`,{record_id:recordId,database});el.innerHTML=renderSQLDiff(res.diff,`目前：${res.database}`,`套用後：${res.backup}`);btn.dataset.previewKey=`${recordId}:${database}`;btn.disabled=false}catch(e){el.innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+async function applySelectedPostgresBackup(){const projectId=document.getElementById('pg-project-sel').value,recordId=Number(document.getElementById('pg-apply-backup').value),database=document.getElementById('pg-apply-db').value,btn=document.getElementById('pg-apply-submit-btn');if(btn.dataset.previewKey!==`${recordId}:${database}`){toast('備份或資料庫已變更，請重新預覽','warning');return}const typed=prompt(`套用會修改 ${database}。請輸入完整資料庫名稱確認：`);if(typed!==database)return;btn.disabled=true;try{const res=await apiPost(`/api/projects/${projectId}/postgres/apply-backup`,{record_id:recordId,database,confirm:typed});toast(`已將 ${res.backup} 套用到 ${database}`,'success');resetBackupApplyPreview()}catch(e){toast(e.message,'error');btn.disabled=false}}
+async function comparePostgresBackups(){const left=Number(document.getElementById('pg-diff-left').value),right=Number(document.getElementById('pg-diff-right').value),el=document.getElementById('pg-diff-result');if(!left||!right||left===right){toast('請選擇兩份不同備份','warning');return}el.innerHTML='<div class="loading"><div class="spinner"></div>比較中...</div>';try{const res=await apiPost('/api/backups/compare',{left_record_id:left,right_record_id:right});el.innerHTML=renderSQLDiff(res.diff,'左側備份','右側備份')}catch(e){el.innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+async function comparePostgresDatabases(){const projectId=document.getElementById('pg-project-sel').value,left=document.getElementById('pg-db-diff-left').value,right=document.getElementById('pg-db-diff-right').value,el=document.getElementById('pg-db-diff-result');if(!left||!right||left===right){toast('請選擇兩個不同資料庫','warning');return}el.innerHTML='<div class="loading"><div class="spinner"></div>讀取兩個資料庫並比較...</div>';try{const res=await apiPost(`/api/projects/${projectId}/postgres/compare`,{left_database:left,right_database:right});el.innerHTML=renderSQLDiff(res.diff,`資料庫：${res.left_database}`,`資料庫：${res.right_database}`)}catch(e){el.innerHTML=`<div class="empty">${esc(e.message)}</div>`}}
+
+function renderSQLDiff(diff,leftLabel,rightLabel){return `<div class="diff-summary"><div class="diff-stat"><b>${diff.left_lines}</b><span>${esc(leftLabel)}有效行</span></div><div class="diff-stat"><b>${diff.right_lines}</b><span>${esc(rightLabel)}有效行</span></div><div class="diff-stat"><b style="color:var(--success)">+${diff.added_lines}</b><span>新增行</span></div><div class="diff-stat"><b style="color:var(--danger)">-${diff.removed_lines}</b><span>移除行</span></div></div>${diff.identical?'<div class="badge badge-success">內容相同</div>':`<div class="form-row"><div class="form-group"><label class="form-label">新增（最多 40 行）</label><div class="sql-preview">${esc((diff.added_sample||[]).join('\n')||'—')}</div></div><div class="form-group"><label class="form-label">移除（最多 40 行）</label><div class="sql-preview">${esc((diff.removed_sample||[]).join('\n')||'—')}</div></div></div>`}`}
 
 async function loadAdminAgents() {
   const el = document.getElementById('admin-agents-panel');
