@@ -132,6 +132,111 @@ func ValidateSQLGzip(path string) error {
 	return nil
 }
 
+// EnsurePostgresDumpRoles creates roles referenced by ownership statements in
+// a plain SQL pg_dump before restore. Database dumps do not contain cluster
+// role attributes or passwords, so missing roles are created as NOLOGIN.
+func EnsurePostgresDumpRoles(cfg *DatabaseConfig, path string) (required, created []string, err error) {
+	if err := requirePostgres(cfg); err != nil {
+		return nil, nil, err
+	}
+	required, err = postgresRolesInGzip(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, role := range required {
+		literal := "'" + strings.ReplaceAll(role, "'", "''") + "'"
+		exists, queryErr := runPostgres(cfg, "postgres", "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = "+literal+");")
+		if queryErr != nil {
+			return required, created, fmt.Errorf("查詢 PostgreSQL role %q 失敗: %w", role, queryErr)
+		}
+		if strings.TrimSpace(exists) == "t" {
+			continue
+		}
+		identifier := `"` + strings.ReplaceAll(role, `"`, `""`) + `"`
+		if _, createErr := runPostgres(cfg, "postgres", "CREATE ROLE "+identifier+" NOLOGIN;"); createErr != nil {
+			return required, created, fmt.Errorf("建立 PostgreSQL role %q 失敗: %w", role, createErr)
+		}
+		created = append(created, role)
+	}
+	return required, created, nil
+}
+
+func postgresRolesInGzip(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+
+	roles := map[string]struct{}{}
+	reader := bufio.NewReader(gz)
+	for {
+		line, readErr := reader.ReadString('\n')
+		trimmed := strings.TrimSpace(line)
+		var token string
+		if pos := strings.LastIndex(trimmed, " OWNER TO "); pos >= 0 && strings.HasSuffix(trimmed, ";") {
+			token = strings.TrimSuffix(strings.TrimSpace(trimmed[pos+len(" OWNER TO "):]), ";")
+		} else if strings.HasPrefix(trimmed, "SET SESSION AUTHORIZATION ") && strings.HasSuffix(trimmed, ";") {
+			token = strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(trimmed, "SET SESSION AUTHORIZATION ")), ";")
+		} else if strings.HasPrefix(trimmed, "SET ROLE ") && strings.HasSuffix(trimmed, ";") {
+			token = strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(trimmed, "SET ROLE ")), ";")
+		}
+		if role, ok := postgresRoleToken(token); ok {
+			roles[role] = struct{}{}
+		}
+		if strings.HasPrefix(trimmed, "ALTER DEFAULT PRIVILEGES FOR ROLE ") {
+			rest := strings.TrimPrefix(trimmed, "ALTER DEFAULT PRIVILEGES FOR ROLE ")
+			if end := strings.IndexByte(rest, ' '); end > 0 {
+				if role, ok := postgresRoleToken(rest[:end]); ok {
+					roles[role] = struct{}{}
+				}
+			}
+		}
+		if strings.HasPrefix(trimmed, "GRANT ") && strings.HasSuffix(trimmed, ";") {
+			if pos := strings.LastIndex(trimmed, " TO "); pos >= 0 {
+				grantRole := strings.TrimSuffix(strings.TrimSpace(trimmed[pos+len(" TO "):]), ";")
+				grantRole = strings.TrimSuffix(grantRole, " WITH GRANT OPTION")
+				if role, ok := postgresRoleToken(grantRole); ok {
+					roles[role] = struct{}{}
+				}
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	result := make([]string, 0, len(roles))
+	for role := range roles {
+		result = append(result, role)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func postgresRoleToken(token string) (string, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" || token == "CURRENT_USER" || token == "SESSION_USER" || token == "PUBLIC" || token == "NONE" {
+		return "", false
+	}
+	if strings.HasPrefix(token, `"`) && strings.HasSuffix(token, `"`) && len(token) >= 2 {
+		return strings.ReplaceAll(token[1:len(token)-1], `""`, `"`), true
+	}
+	for _, r := range token {
+		if !(r == '_' || r == '$' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return "", false
+		}
+	}
+	return strings.ToLower(token), true
+}
+
 func requirePostgres(cfg *DatabaseConfig) error {
 	if cfg == nil {
 		return fmt.Errorf("database config required")

@@ -52,6 +52,30 @@ func TestValidateSQLGzipRejectsEmptyDump(t *testing.T) {
 	}
 }
 
+func TestPostgresRolesInGzip(t *testing.T) {
+	path := writeTestGzip(t, t.TempDir(), "roles.sql.gz", `
+ALTER TABLE public.example OWNER TO englishability_user;
+ALTER SEQUENCE public.example_id_seq OWNER TO "Case Sensitive";
+SET SESSION AUTHORIZATION englishability_user;
+ALTER TABLE public.other OWNER TO CURRENT_USER;
+GRANT SELECT ON TABLE public.example TO report_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE englishability_user GRANT SELECT ON TABLES TO report_reader;
+`)
+	roles, err := postgresRolesInGzip(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Case Sensitive", "englishability_user", "report_reader"}
+	if len(roles) != len(want) {
+		t.Fatalf("roles = %#v, want %#v", roles, want)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("roles = %#v, want %#v", roles, want)
+		}
+	}
+}
+
 func writeTestGzip(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

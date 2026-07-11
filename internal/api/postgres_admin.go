@@ -251,6 +251,11 @@ func (h *postgresAdminHandler) applyBackupToDatabase(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadGateway, "套用前 snapshot 失敗: "+err.Error())
 		return
 	}
+	requiredRoles, createdRoles, err := backup.EnsurePostgresDumpRoles(&targetCfg, rec.Path)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "建立備份所需 PostgreSQL role 失敗: "+err.Error())
+		return
+	}
 	if err := backup.DeletePostgresDatabase(&targetCfg, req.Database); err != nil {
 		writeError(w, http.StatusBadGateway, "重建目標資料庫失敗: "+err.Error())
 		return
@@ -270,7 +275,7 @@ func (h *postgresAdminHandler) applyBackupToDatabase(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadGateway, msg)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "applied", "database": req.Database, "record_id": rec.ID, "backup": filepath.Base(rec.Path), "snapshot_path": snapshotPath})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "applied", "database": req.Database, "record_id": rec.ID, "backup": filepath.Base(rec.Path), "snapshot_path": snapshotPath, "required_roles": requiredRoles, "created_roles": createdRoles})
 }
 
 func (h *postgresAdminHandler) rollbackDatabase(cfg *backup.DatabaseConfig, snapshotPath string) error {
