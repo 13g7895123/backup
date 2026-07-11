@@ -35,6 +35,8 @@ services:
     volumes:
       # NAS 掛載（可讀寫）
       - /mnt/nas:/mnt/nas
+      # Agent release artifacts（持久化，避免重建容器後遺失）
+      - agent_releases:/var/lib/backup-agent/releases
       # Host 系統目錄（唯讀，備份來源）
       - /etc:/host/etc:ro
       - /home:/host/home:ro
@@ -47,6 +49,8 @@ services:
       HOST_PREFIX: /host
       NAS_BASE: /mnt/nas/backups
       DASHBOARD_ADDR: :8080
+      AGENT_RELEASES_DIR: /var/lib/backup-agent/releases
+      DASHBOARD_PUBLIC_URL: "${DASHBOARD_PUBLIC_URL:-}"
       TZ: Asia/Taipei
       CORS_ORIGINS: "${CORS_ORIGINS:-}"
     secrets:
@@ -54,6 +58,7 @@ services:
 
 volumes:
   pgdata:
+  agent_releases:
 
 secrets:
   pg_password:
