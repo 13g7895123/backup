@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"backup-manager/internal/backup"
 	"backup-manager/internal/store"
@@ -52,11 +53,65 @@ func RegisterPostgresAdminRoutes(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("POST /api/projects/{id}/postgres/databases", h.createDatabase)
 	mux.HandleFunc("DELETE /api/projects/{id}/postgres/databases/{name}", h.deleteDatabase)
 	mux.HandleFunc("POST /api/projects/{id}/postgres/data", h.applyData)
+	mux.HandleFunc("POST /api/projects/{id}/postgres/test-data", h.createTestData)
 	mux.HandleFunc("POST /api/projects/{id}/postgres/compare", h.compareDatabases)
 	mux.HandleFunc("POST /api/projects/{id}/postgres/backup-preview", h.previewBackupToDatabase)
 	mux.HandleFunc("POST /api/projects/{id}/postgres/apply-backup", h.applyBackupToDatabase)
 	mux.HandleFunc("POST /api/backups/compare", h.compareBackups)
 	mux.HandleFunc("GET /api/backups/{bid}/restore-preview", h.restorePreview)
+}
+
+func (h *postgresAdminHandler) createTestData(w http.ResponseWriter, r *http.Request) {
+	_, cfg, ok := h.projectConfig(w, r)
+	if !ok {
+		return
+	}
+	var req postgresDataRequest
+	if err := decodeLimitedJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Database = strings.TrimSpace(req.Database)
+	if err := h.requireManageableDatabase(cfg, req.Database); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tableName := "test_" + time.Now().Format("20060102_150405_000000000")
+	sql := fmt.Sprintf(`CREATE TABLE %s (
+    id BIGSERIAL PRIMARY KEY,
+    test_text TEXT NOT NULL,
+    test_number INTEGER NOT NULL,
+    test_boolean BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO %s (test_text, test_number, test_boolean) VALUES
+    ('測試資料 A', 100, true),
+    ('測試資料 B', 200, false),
+    ('測試資料 C', 300, true);`, tableName, tableName)
+	if err := backup.ApplyPostgresData(cfg, req.Database, sql); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "created", "database": req.Database, "table": tableName, "rows": 3,
+		"columns": []string{"id", "test_text", "test_number", "test_boolean", "created_at"},
+	})
+}
+
+func (h *postgresAdminHandler) requireManageableDatabase(cfg *backup.DatabaseConfig, database string) error {
+	if err := validDatabaseName(database); err != nil {
+		return err
+	}
+	names, err := backup.ListPostgresDatabases(cfg)
+	if err != nil {
+		return fmt.Errorf("無法確認測試資料庫: %w", err)
+	}
+	for _, name := range manageablePostgresDatabases(names, cfg.Name) {
+		if name == database {
+			return nil
+		}
+	}
+	return fmt.Errorf("只能在可管理的獨立測試資料庫建立測試資料")
 }
 
 func (h *postgresAdminHandler) diagnose(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +387,22 @@ func (h *postgresAdminHandler) listDatabases(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"databases": names, "configured_database": cfg.Name})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"databases":       manageablePostgresDatabases(names, cfg.Name),
+		"database_count":  len(manageablePostgresDatabases(names, cfg.Name)),
+		"system_database": cfg.Name,
+	})
+}
+
+func manageablePostgresDatabases(names []string, systemDatabase string) []string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == systemDatabase || name == "postgres" || name == "template0" || name == "template1" {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered
 }
 
 func (h *postgresAdminHandler) createDatabase(w http.ResponseWriter, r *http.Request) {
@@ -396,6 +466,10 @@ func (h *postgresAdminHandler) applyData(w http.ResponseWriter, r *http.Request)
 	}
 	if req.Confirm != "APPLY" {
 		writeError(w, http.StatusBadRequest, "資料匯入需 confirm=APPLY")
+		return
+	}
+	if err := h.requireManageableDatabase(cfg, strings.TrimSpace(req.Database)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := backup.ApplyPostgresData(cfg, req.Database, req.SQL); err != nil {

@@ -25,3 +25,10 @@ func TestDashboardPostgresConfig(t *testing.T) {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }
+
+func TestManageablePostgresDatabases(t *testing.T) {
+	got := manageablePostgresDatabases([]string{"backup_manager", "compare_a", "postgres", "compare_b", "template0", "template1"}, "backup_manager")
+	if len(got) != 2 || got[0] != "compare_a" || got[1] != "compare_b" {
+		t.Fatalf("unexpected databases: %#v", got)
+	}
+}
