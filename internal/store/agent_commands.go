@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	AgentCommandTypeTriggerBackup = "trigger_backup"
-	AgentCommandTypeRestoreBackup = "restore_backup"
+	AgentCommandTypeTriggerBackup  = "trigger_backup"
+	AgentCommandTypeRestoreBackup  = "restore_backup"
 	AgentCommandTypeReloadSchedule = "reload_schedule"
 	AgentCommandTypeRemoveSchedule = "remove_schedule"
 
@@ -96,7 +96,8 @@ func (s *Store) ClaimPendingAgentCommands(ctx context.Context, agentID, limit in
 		WHERE ac.id = picked.id
 		RETURNING ac.id, ac.agent_id, ac.project_id, ac.schedule_id, ac.restore_record_id,
 		          ac.type, ac.payload, ac.status, ac.result, ac.log_output, ac.log_ref,
-		          ac.error_msg, ac.attempt_count, ac.created_at, ac.started_at, ac.finished_at`)
+		          ac.error_msg, ac.attempt_count, ac.created_at, ac.started_at, ac.finished_at`,
+		agentID, limit)
 	if err != nil {
 		return nil, err
 	}
