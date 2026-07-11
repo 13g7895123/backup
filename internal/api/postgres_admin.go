@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,6 +48,7 @@ type backupCompareRequest struct {
 func RegisterPostgresAdminRoutes(mux *http.ServeMux, s *store.Store) {
 	h := &postgresAdminHandler{store: s}
 	mux.HandleFunc("GET /api/projects/{id}/postgres/databases", h.listDatabases)
+	mux.HandleFunc("GET /api/projects/{id}/postgres/diagnose", h.diagnose)
 	mux.HandleFunc("POST /api/projects/{id}/postgres/databases", h.createDatabase)
 	mux.HandleFunc("DELETE /api/projects/{id}/postgres/databases/{name}", h.deleteDatabase)
 	mux.HandleFunc("POST /api/projects/{id}/postgres/data", h.applyData)
@@ -55,6 +57,68 @@ func RegisterPostgresAdminRoutes(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("POST /api/projects/{id}/postgres/apply-backup", h.applyBackupToDatabase)
 	mux.HandleFunc("POST /api/backups/compare", h.compareBackups)
 	mux.HandleFunc("GET /api/backups/{bid}/restore-preview", h.restorePreview)
+}
+
+func (h *postgresAdminHandler) diagnose(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 project id")
+		return
+	}
+	project, err := h.store.GetProject(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到專案")
+		return
+	}
+	result := map[string]any{
+		"project_id": project.ID, "project_name": project.Name,
+		"executor_type": project.ExecutorType, "transfer_mode": project.TransferMode,
+	}
+	cfg, cfgErr := dashboardPostgresConfig()
+	dbResult := map[string]any{"ok": false}
+	if cfgErr != nil {
+		dbResult["error"] = cfgErr.Error()
+	} else {
+		dbResult["host"] = cfg.Host
+		dbResult["port"] = cfg.Port
+		dbResult["user"] = cfg.User
+		dbResult["database"] = cfg.Name
+		names, err := backup.ListPostgresDatabases(cfg)
+		if err != nil {
+			dbResult["error"] = err.Error()
+		} else {
+			dbResult["ok"] = true
+			dbResult["database_count"] = len(names)
+		}
+	}
+	result["postgres"] = dbResult
+	records, total, recordsErr := h.store.ListRecords(r.Context(), store.ListRecordsFilter{ProjectID: &id, Type: "database", Status: "success", Limit: 100})
+	nasResult := map[string]any{"ok": false, "record_count": total}
+	if recordsErr != nil {
+		nasResult["error"] = recordsErr.Error()
+	} else {
+		readable := 0
+		var unreadable []map[string]any
+		for i := range records {
+			path := h.dashboardRecordPath(r.Context(), project, &records[i])
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				readable++
+			} else if len(unreadable) < 10 {
+				msg := "path is a directory"
+				if err != nil {
+					msg = err.Error()
+				}
+				unreadable = append(unreadable, map[string]any{"record_id": records[i].ID, "filename": records[i].Filename, "path": path, "error": msg})
+			}
+		}
+		nasResult["ok"] = readable == len(records)
+		nasResult["checked_count"] = len(records)
+		nasResult["readable_count"] = readable
+		nasResult["unreadable_count"] = len(records) - readable
+		nasResult["unreadable"] = unreadable
+	}
+	result["nas_backups"] = nasResult
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *postgresAdminHandler) previewBackupToDatabase(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +228,7 @@ func (h *postgresAdminHandler) backupApplyRequest(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, err.Error())
 		return nil, nil, req, false
 	}
-	if req.Database == p.DbName || req.Database == "postgres" || req.Database == "template0" || req.Database == "template1" {
+	if req.Database == cfg.Name || req.Database == p.DbName || req.Database == "postgres" || req.Database == "template0" || req.Database == "template1" {
 		writeError(w, http.StatusBadRequest, "只能套用到獨立測試資料庫，不可選擇專案預設或系統資料庫")
 		return nil, nil, req, false
 	}
@@ -300,6 +364,10 @@ func (h *postgresAdminHandler) deleteDatabase(w http.ResponseWriter, r *http.Req
 		return
 	}
 	name := strings.TrimSpace(r.PathValue("name"))
+	if name == cfg.Name {
+		writeError(w, http.StatusBadRequest, "不可刪除 Backup Manager 系統資料庫")
+		return
+	}
 	var req postgresDatabaseRequest
 	if err := decodeLimitedJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -401,15 +469,36 @@ func (h *postgresAdminHandler) projectConfig(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "找不到專案")
 		return nil, nil, false
 	}
-	cfg := &backup.DatabaseConfig{DBType: p.DbType, Host: p.DbHost, Port: p.DbPort, Name: p.DbName, User: p.DbUser, Password: p.DbPassword, PasswordEnv: p.DbPasswordEnv, ContainerName: p.DockerDbContainer}
-	if cfg.DBType != "postgres" {
-		writeError(w, http.StatusBadRequest, "專案不是 PostgreSQL 設定")
+	cfg, err := dashboardPostgresConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return nil, nil, false
 	}
-	if cfg.Port == 0 {
-		cfg.Port = 5432
-	}
 	return p, cfg, true
+}
+
+func dashboardPostgresConfig() (*backup.DatabaseConfig, error) {
+	raw := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if raw == "" {
+		return nil, fmt.Errorf("DATABASE_URL 未設定，無法連線 Backup Manager PostgreSQL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		return nil, fmt.Errorf("DATABASE_URL 不是有效的 PostgreSQL URL")
+	}
+	password, _ := u.User.Password()
+	port := 5432
+	if u.Port() != "" {
+		port, err = strconv.Atoi(u.Port())
+		if err != nil {
+			return nil, fmt.Errorf("DATABASE_URL port 無效")
+		}
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if u.Hostname() == "" || u.User.Username() == "" || name == "" {
+		return nil, fmt.Errorf("DATABASE_URL 缺少 host、user 或 database")
+	}
+	return &backup.DatabaseConfig{DBType: "postgres", Host: u.Hostname(), Port: port, Name: name, User: u.User.Username(), Password: password}, nil
 }
 
 func (h *postgresAdminHandler) databaseRecords(r *http.Request, leftID, rightID int64) (*store.BackupRecord, *store.BackupRecord, error) {
