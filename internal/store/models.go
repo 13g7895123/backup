@@ -210,7 +210,7 @@ func (s *Store) CreateProject(ctx context.Context, p *Project) (*Project, error)
 		   project_path, backup_dirs, db_type, db_host, db_port,
 		   db_name, db_user, db_password, db_password_env, docker_db_container,
 		   executor_type, executor_agent_id, transfer_mode)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		RETURNING id, created_at, updated_at`,
 		p.Name, p.Description, p.Enabled, p.NasBase, p.NasTargetID, p.NasSubpath,
 		p.ProjectPath, p.BackupDirs, p.DbType, p.DbHost, p.DbPort,
