@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,7 +75,7 @@ func (h *postgresAdminHandler) previewBackupToDatabase(w http.ResponseWriter, r 
 		writeError(w, http.StatusBadGateway, "讀取目標資料庫失敗: "+err.Error())
 		return
 	}
-	rec, err := h.validProjectDatabaseRecord(r, p.ID, req.RecordID)
+	rec, err := h.validProjectDatabaseRecord(r, p, req.RecordID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -96,7 +97,7 @@ func (h *postgresAdminHandler) applyBackupToDatabase(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, "confirm 必須等於完整目標資料庫名稱")
 		return
 	}
-	rec, err := h.validProjectDatabaseRecord(r, p.ID, req.RecordID)
+	rec, err := h.validProjectDatabaseRecord(r, p, req.RecordID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -170,18 +171,41 @@ func (h *postgresAdminHandler) backupApplyRequest(w http.ResponseWriter, r *http
 	return p, cfg, req, true
 }
 
-func (h *postgresAdminHandler) validProjectDatabaseRecord(r *http.Request, projectID int, recordID int64) (*store.BackupRecord, error) {
+func (h *postgresAdminHandler) validProjectDatabaseRecord(r *http.Request, project *store.Project, recordID int64) (*store.BackupRecord, error) {
 	rec, err := h.store.GetRecord(r.Context(), recordID)
 	if err != nil {
 		return nil, fmt.Errorf("找不到備份紀錄")
 	}
-	if rec.ProjectID == nil || *rec.ProjectID != projectID {
+	if rec.ProjectID == nil || *rec.ProjectID != project.ID {
 		return nil, fmt.Errorf("備份不屬於此專案")
 	}
 	if rec.Type != "database" || rec.Status != "success" {
 		return nil, fmt.Errorf("只能套用成功的資料庫備份")
 	}
+	rec.Path = h.dashboardRecordPath(r.Context(), project, rec)
 	return rec, nil
+}
+
+func (h *postgresAdminHandler) dashboardRecordPath(ctx context.Context, project *store.Project, rec *store.BackupRecord) string {
+	if rec == nil {
+		return ""
+	}
+	if project == nil || rec.AgentID == nil || project.NasBase == "" {
+		return rec.Path
+	}
+	agentBase, err := h.store.GetAgentNASMountBase(ctx, *rec.AgentID, project.NasTargetID)
+	if err != nil || agentBase == "" {
+		return rec.Path
+	}
+	cleanRecord, cleanAgent := filepath.Clean(rec.Path), filepath.Clean(agentBase)
+	if cleanRecord == cleanAgent {
+		return filepath.Clean(project.NasBase)
+	}
+	prefix := cleanAgent + string(os.PathSeparator)
+	if strings.HasPrefix(cleanRecord, prefix) {
+		return filepath.Join(filepath.Clean(project.NasBase), strings.TrimPrefix(cleanRecord, prefix))
+	}
+	return rec.Path
 }
 
 func (h *postgresAdminHandler) compareDatabases(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +372,13 @@ func (h *postgresAdminHandler) restorePreview(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusNotFound, "這是此備份目標的第一份成功備份，沒有上次備份可比較")
 		return
 	}
+	project, err := h.store.GetProject(r.Context(), *rec.ProjectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到專案")
+		return
+	}
+	rec.Path = h.dashboardRecordPath(r.Context(), project, rec)
+	previous.Path = h.dashboardRecordPath(r.Context(), project, previous)
 	diff, err := backup.CompareSQLGzipFiles(previous.Path, rec.Path)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "無法讀取備份檔案: "+err.Error())
@@ -368,10 +399,6 @@ func (h *postgresAdminHandler) projectConfig(w http.ResponseWriter, r *http.Requ
 	p, err := h.store.GetProject(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "找不到專案")
-		return nil, nil, false
-	}
-	if p.ExecutorType == "agent" {
-		writeError(w, http.StatusConflict, "資料庫管理目前只支援 dashboard local executor")
 		return nil, nil, false
 	}
 	cfg := &backup.DatabaseConfig{DBType: p.DbType, Host: p.DbHost, Port: p.DbPort, Name: p.DbName, User: p.DbUser, Password: p.DbPassword, PasswordEnv: p.DbPasswordEnv, ContainerName: p.DockerDbContainer}

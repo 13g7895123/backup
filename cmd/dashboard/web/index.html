@@ -116,15 +116,17 @@ textarea.form-input{resize:vertical;min-height:72px}
 .tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:18px;overflow-x:auto}
 .tab{padding:10px 16px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-size:15px;white-space:nowrap}
 .tab:hover{color:var(--text)}.tab.active{color:var(--primary);border-bottom-color:var(--primary)}
-.admin-tabs{position:sticky;top:0;z-index:20;background:var(--bg);padding-top:4px}
-.admin-tabs .tab{min-height:44px;border:0;border-bottom:2px solid transparent;background:transparent;font:inherit}
-.admin-tabs .tab:focus-visible{outline:2px solid var(--primary);outline-offset:-3px;border-radius:4px}
+.admin-tabs{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:8px;background:var(--bg);padding:8px 0 14px;border:0;margin-bottom:10px;overflow:visible}
+.admin-tabs .tab{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:8px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:0 1px 2px rgba(15,23,42,.04);color:var(--text2);font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease}
+.admin-tabs .tab:hover{background:var(--surface2);border-color:var(--text3);color:var(--text)}
+.admin-tabs .tab.active{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 4px 10px rgba(37,99,235,.18)}
+.admin-tabs .tab:focus-visible{outline:3px solid rgba(37,99,235,.25);outline-offset:2px}
 .admin-tab-panel[hidden]{display:none!important}
 .diff-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}
 .diff-stat{padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}
 .diff-stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}.diff-stat span{font-size:12px;color:var(--text2)}
 .sql-preview{max-height:220px;overflow:auto;padding:12px;background:#172033;color:#e2e8f0;border-radius:6px;font:12px/1.55 monospace;white-space:pre-wrap;word-break:break-word}
-@media(max-width:640px){.diff-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:640px){.diff-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:12px}.admin-tabs .tab{flex:0 0 auto}}
 /* Page header */
 .page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap;gap:10px}
 .page-hdr-left h1{font-size:22px;font-weight:700}.page-hdr-left p{font-size:14px;color:var(--text2);margin-top:3px}
@@ -4284,7 +4286,7 @@ function renderAdmin() {
     (projects || []).filter(p => p.db_type === 'postgres').forEach(p => {
       const o = document.createElement('option');
       o.value = p.id;
-      o.textContent = `${p.name}${p.executor_type === 'agent' ? '（Agent，唯讀提示）' : ''}`;
+      o.textContent = p.name;
       pgSel?.appendChild(o);
     });
   }).catch(() => {});
@@ -4309,7 +4311,8 @@ function initAdminTabs() {
     panel.classList.add('admin-tab-panel');
     panel.id = `admin-panel-${index}`;
     panel.setAttribute('role', 'tabpanel');
-    const title = panel.dataset.adminTab || panel.querySelector('.card-title')?.textContent.trim() || `功能 ${index+1}`;
+    const titleEl = panel.querySelector('.card-title');
+    const title = panel.dataset.adminTab || titleEl?.querySelector(':scope > span')?.textContent.trim() || [...(titleEl?.childNodes || [])].find(n => n.nodeType === Node.TEXT_NODE && n.textContent.trim())?.textContent.trim() || `功能 ${index+1}`;
     const btn = document.createElement('button');
     btn.type = 'button'; btn.className = 'tab'; btn.id = `admin-tab-${index}`;
     btn.setAttribute('role','tab'); btn.setAttribute('aria-controls',panel.id);
