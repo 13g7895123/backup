@@ -39,6 +39,22 @@ func ListPostgresDatabases(cfg *DatabaseConfig) ([]string, error) {
 	return names, nil
 }
 
+func PostgresVersions(cfg *DatabaseConfig) (serverVersion, clientVersion string, err error) {
+	if err := requirePostgres(cfg); err != nil {
+		return "", "", err
+	}
+	out, err := exec.Command("pg_dump", "--version").CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("pg_dump --version failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	clientVersion = strings.TrimSpace(string(out))
+	serverVersion, err = runPostgres(cfg, cfg.Name, "SHOW server_version;")
+	if err != nil {
+		return "", clientVersion, err
+	}
+	return strings.TrimSpace(serverVersion), clientVersion, nil
+}
+
 func DeletePostgresDatabase(cfg *DatabaseConfig, name string) error {
 	if err := requirePostgres(cfg); err != nil {
 		return err

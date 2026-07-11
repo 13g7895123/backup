@@ -13,13 +13,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/dashboard ./cmd/d
 
 # ── Agent image ────────────────────────────────────────────────────────────────
 # 需要 pg_dump / mysqldump / tar 等工具
-FROM debian:bookworm-slim AS agent
+FROM postgres:16-bookworm AS agent
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tar \
     gzip \
-    postgresql-client \
     default-mysql-client \
     && rm -rf /var/lib/apt/lists/*
 
@@ -34,13 +33,12 @@ ENTRYPOINT ["/app/agent"]
 
 # ── Dashboard image ────────────────────────────────────────────────────────────
 # 同樣需要備份工具（單一二進位同時跑 API + 排程器）
-FROM debian:bookworm-slim AS dashboard
+FROM postgres:16-bookworm AS dashboard
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tar \
     gzip \
-    postgresql-client \
     default-mysql-client \
     && rm -rf /var/lib/apt/lists/*
 

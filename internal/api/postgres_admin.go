@@ -145,6 +145,12 @@ func (h *postgresAdminHandler) diagnose(w http.ResponseWriter, r *http.Request) 
 			dbResult["ok"] = true
 			dbResult["database_count"] = len(names)
 		}
+		serverVersion, clientVersion, versionErr := backup.PostgresVersions(cfg)
+		dbResult["server_version"] = serverVersion
+		dbResult["pg_dump_version"] = clientVersion
+		if versionErr != nil {
+			dbResult["version_error"] = versionErr.Error()
+		}
 	}
 	result["postgres"] = dbResult
 	records, total, recordsErr := h.store.ListRecords(r.Context(), store.ListRecordsFilter{ProjectID: &id, Type: "database", Status: "success", Limit: 100})
