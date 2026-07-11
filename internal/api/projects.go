@@ -39,7 +39,7 @@ func (h *projectHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+	writeJSON(w, http.StatusOK, projectsWithoutPasswords(projects))
 }
 
 func (h *projectHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func (h *projectHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "找不到專案")
 		return
 	}
-	writeJSON(w, http.StatusOK, proj)
+	writeJSON(w, http.StatusOK, projectWithoutPassword(proj))
 }
 
 func (h *projectHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +82,7 @@ func (h *projectHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	// 依專案設定自動建立備份目標
 	h.autoCreateTargets(r.Context(), result)
-	writeJSON(w, http.StatusCreated, result)
+	writeJSON(w, http.StatusCreated, projectWithoutPassword(result))
 }
 
 // autoCreateTargets 根據專案的 backup_dirs / DB 設定自動建立 backup_targets
@@ -153,6 +153,11 @@ func (h *projectHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.ID = id
+	// Passwords are intentionally never returned by the management API. An
+	// empty password on update therefore means "keep the existing secret".
+	if p.DbPassword == "" {
+		p.DbPassword = before.DbPassword
+	}
 	h.applyProjectDefaults(r.Context(), &p)
 	if err := h.validateProject(r.Context(), &p); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -169,6 +174,24 @@ func (h *projectHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func projectWithoutPassword(project *store.Project) *store.Project {
+	if project == nil {
+		return nil
+	}
+	result := *project
+	result.DbPassword = ""
+	return &result
+}
+
+func projectsWithoutPasswords(projects []store.Project) []store.Project {
+	result := make([]store.Project, len(projects))
+	copy(result, projects)
+	for i := range result {
+		result[i].DbPassword = ""
+	}
+	return result
 }
 
 func (h *projectHandler) validateProject(ctx context.Context, p *store.Project) error {
@@ -443,8 +466,8 @@ func buildExport(ctx context.Context, s *store.Store, p *store.Project) (*Projec
 	}
 	return &ProjectExport{
 		Version:   "1",
-		Project:   p,
-		Targets:   targets,
+		Project:   projectWithoutPassword(p),
+		Targets:   targetsWithoutPasswords(targets),
 		Schedules: schedules,
 	}, nil
 }

@@ -207,8 +207,8 @@ func projectOverview(s *store.Store) func(http.ResponseWriter, *http.Request, in
 		recentRecords, total, _ := s.ListRecords(r.Context(), f)
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"project":        proj,
-			"targets":        nullSlice(targets),
+			"project":        projectWithoutPassword(proj),
+			"targets":        nullSlice(targetsWithoutPasswords(targets)),
 			"schedules":      nullSlice(schedules),
 			"retention":      nullSlice(retention),
 			"recent_backups": nullSlice(recentRecords),
@@ -225,7 +225,7 @@ func projectTargets(s *store.Store) func(http.ResponseWriter, *http.Request, int
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, nullSlice(targets))
+		writeJSON(w, http.StatusOK, nullSlice(targetsWithoutPasswords(targets)))
 	}
 }
 

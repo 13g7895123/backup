@@ -30,7 +30,7 @@ func (h *targetHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "找不到備份目標")
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	writeJSON(w, http.StatusOK, targetWithoutPassword(t))
 }
 
 func (h *targetHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +44,7 @@ func (h *targetHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, targets)
+	writeJSON(w, http.StatusOK, targetsWithoutPasswords(targets))
 }
 
 func (h *targetHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +69,7 @@ func (h *targetHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, result)
+	writeJSON(w, http.StatusCreated, targetWithoutPassword(result))
 }
 
 func (h *targetHandler) update(w http.ResponseWriter, r *http.Request) {
@@ -84,11 +84,69 @@ func (h *targetHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.ID = tid
+	before, err := h.store.GetTarget(r.Context(), tid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到備份目標")
+		return
+	}
+	t.Config = preserveTargetPassword(t.Config, before.Config)
 	if err := h.store.UpdateTarget(r.Context(), &t); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func targetWithoutPassword(target *store.BackupTarget) *store.BackupTarget {
+	if target == nil {
+		return nil
+	}
+	result := *target
+	result.Config = redactTargetPassword(result.Config)
+	return &result
+}
+
+func targetsWithoutPasswords(targets []store.BackupTarget) []store.BackupTarget {
+	result := make([]store.BackupTarget, len(targets))
+	copy(result, targets)
+	for i := range result {
+		result[i].Config = redactTargetPassword(result[i].Config)
+	}
+	return result
+}
+
+func redactTargetPassword(config json.RawMessage) json.RawMessage {
+	var values map[string]any
+	if json.Unmarshal(config, &values) != nil {
+		return config
+	}
+	if _, exists := values["password"]; exists {
+		values["password"] = ""
+	}
+	redacted, err := json.Marshal(values)
+	if err != nil {
+		return config
+	}
+	return redacted
+}
+
+func preserveTargetPassword(current, previous json.RawMessage) json.RawMessage {
+	var currentValues, previousValues map[string]any
+	if json.Unmarshal(current, &currentValues) != nil || json.Unmarshal(previous, &previousValues) != nil {
+		return current
+	}
+	password, _ := currentValues["password"].(string)
+	if password != "" {
+		return current
+	}
+	if previousPassword, exists := previousValues["password"]; exists {
+		currentValues["password"] = previousPassword
+	}
+	merged, err := json.Marshal(currentValues)
+	if err != nil {
+		return current
+	}
+	return merged
 }
 
 func (h *targetHandler) delete(w http.ResponseWriter, r *http.Request) {
