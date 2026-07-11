@@ -67,6 +67,7 @@ func main() {
 	api.RegisterRestoreRoute(mux, s)
 	api.RegisterSummaryRoute(mux, s)
 	api.RegisterAgentRoutes(mux, s)
+	api.RegisterAgentCommandRoutes(mux, s)
 	api.RegisterAgentReleaseRoutes(mux, s)
 	api.RegisterSyslogRoutes(mux, s, sgSched)
 	api.RegisterGcpRoutes(mux, s, sgSched)

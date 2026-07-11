@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"backup-manager/internal/scheduler"
 	"backup-manager/internal/store"
 )
+
+var buildVersion = "dev"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -47,7 +50,9 @@ func main() {
 	}
 	defer sched.Stop()
 
-	go startHeartbeat(ctx, c)
+	commandCh := make(chan store.AgentCommand, 32)
+	go startCommandWorker(ctx, c, runner, sched, commandCh)
+	go startHeartbeat(ctx, c, commandCh)
 
 	// ── HTTP server（供 dashboard 轉發 trigger）─────────────────────
 	mux := http.NewServeMux()
@@ -271,6 +276,7 @@ func main() {
 	defer srv.Shutdown(context.Background())
 
 	log.Printf("[agent] 啟動完成，dashboard: %s", dashURL)
+	log.Printf("[agent] version=%s", agentVersion())
 	log.Printf("[agent] AGENT_CODE=%q", agentCode)
 	log.Printf("[agent] HOST_PREFIX=%q  NAS_BASE=%q",
 		getEnvOr("HOST_PREFIX", ""), getEnvOr("NAS_BASE", "/mnt/nas/backups"))
@@ -425,17 +431,27 @@ func getEnvOr(key, fallback string) string {
 	return fallback
 }
 
-func startHeartbeat(ctx context.Context, c *client.DashboardClient) {
+func startHeartbeat(ctx context.Context, c *client.DashboardClient, commandCh chan<- store.AgentCommand) {
 	send := func() {
 		host, _ := os.Hostname()
 		hb := store.AgentHeartbeat{
 			HostName:  host,
 			IPAddress: getEnvOr("AGENT_IP_ADDRESS", ""),
-			Version:   getEnvOr("AGENT_VERSION", "dev"),
+			Version:   agentVersion(),
 			LastError: "",
 		}
-		if err := c.Heartbeat(ctx, hb); err != nil {
+		commands, err := c.Heartbeat(ctx, hb)
+		if err != nil {
 			log.Printf("[agent] heartbeat 失敗: %v", err)
+			return
+		}
+		for _, cmd := range commands {
+			select {
+			case commandCh <- cmd:
+				log.Printf("[agent] queued command id=%d type=%s", cmd.ID, cmd.Type)
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 
@@ -450,4 +466,147 @@ func startHeartbeat(ctx context.Context, c *client.DashboardClient) {
 			send()
 		}
 	}
+}
+
+func agentVersion() string {
+	if v := getEnvOr("AGENT_VERSION", ""); v != "" && v != "dev" {
+		return v
+	}
+	if buildVersion != "" {
+		return buildVersion
+	}
+	return "dev"
+}
+
+func startCommandWorker(ctx context.Context, c *client.DashboardClient, runner *backup.Runner, sched *scheduler.DynamicScheduler, commandCh <-chan store.AgentCommand) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case cmd := <-commandCh:
+			executeAgentCommand(context.Background(), c, runner, sched, cmd)
+		}
+	}
+}
+
+func executeAgentCommand(ctx context.Context, c *client.DashboardClient, runner *backup.Runner, sched *scheduler.DynamicScheduler, cmd store.AgentCommand) {
+	var logBuf bytes.Buffer
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(&logBuf, "%s ", time.Now().Format(time.RFC3339))
+		fmt.Fprintf(&logBuf, format, args...)
+		logBuf.WriteByte('\n')
+	}
+
+	logf("command start id=%d type=%s", cmd.ID, cmd.Type)
+
+	status := store.AgentCommandStatusSuccess
+	result := json.RawMessage(`{}`)
+	logRef := ""
+	errorMsg := ""
+
+	switch cmd.Type {
+	case store.AgentCommandTypeTriggerBackup:
+		var payload api.TriggerBackupCommandPayload
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = "invalid trigger payload: " + err.Error()
+			logf("%s", errorMsg)
+			break
+		}
+		if payload.TargetType == "" {
+			payload.TargetType = "all"
+		}
+		logf("trigger backup project_id=%d target_type=%s smoke=%t", payload.ProjectID, payload.TargetType, payload.Smoke)
+		var err error
+		if payload.Smoke {
+			err = runner.RunProjectWithOptions(ctx, payload.ProjectID, []string{payload.TargetType}, backup.RunOptions{
+				TriggeredBy: "smoke-backup",
+				Smoke:       true,
+			})
+		} else {
+			err = runner.RunProject(ctx, payload.ProjectID, []string{payload.TargetType}, nil, "manual")
+		}
+		if err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = err.Error()
+			logf("trigger backup failed: %v", err)
+		} else {
+			logf("trigger backup success")
+			result = mustJSON(map[string]any{
+				"project_id":  payload.ProjectID,
+				"target_type": payload.TargetType,
+				"smoke":       payload.Smoke,
+			})
+		}
+
+	case store.AgentCommandTypeRestoreBackup:
+		var payload api.RestoreBackupCommandPayload
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = "invalid restore payload: " + err.Error()
+			logf("%s", errorMsg)
+			break
+		}
+		logf("restore start record_id=%d strategy=%s target=%q restore_id=%d", payload.RecordID, payload.Strategy, payload.Target, payload.RestoreID)
+		out, err := runRestore(ctx, c, payload.RecordID, payload.Strategy, payload.Target)
+		if err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = err.Error()
+			logf("restore failed: %v", err)
+		} else {
+			logf("restore success")
+			result = mustJSON(out)
+		}
+
+	case store.AgentCommandTypeReloadSchedule:
+		var payload api.ScheduleCommandPayload
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = "invalid reload payload: " + err.Error()
+			logf("%s", errorMsg)
+			break
+		}
+		logf("reload schedule schedule_id=%d", payload.ScheduleID)
+		if err := sched.Reload(ctx, payload.ScheduleID); err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = err.Error()
+			logf("reload schedule failed: %v", err)
+		} else {
+			result = mustJSON(map[string]any{"schedule_id": payload.ScheduleID, "action": "reload"})
+			logf("reload schedule success")
+		}
+
+	case store.AgentCommandTypeRemoveSchedule:
+		var payload api.ScheduleCommandPayload
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			status = store.AgentCommandStatusFailed
+			errorMsg = "invalid remove payload: " + err.Error()
+			logf("%s", errorMsg)
+			break
+		}
+		logf("remove schedule schedule_id=%d", payload.ScheduleID)
+		sched.Remove(payload.ScheduleID)
+		result = mustJSON(map[string]any{"schedule_id": payload.ScheduleID, "action": "remove"})
+		logf("remove schedule success")
+
+	default:
+		status = store.AgentCommandStatusFailed
+		errorMsg = "unsupported command type: " + cmd.Type
+		logf("%s", errorMsg)
+	}
+
+	logf("command finish status=%s", status)
+	if err := c.FinishAgentCommand(ctx, cmd.ID, status, result, logBuf.String(), logRef, errorMsg); err != nil {
+		log.Printf("[agent] finish command id=%d err=%v", cmd.ID, err)
+		return
+	}
+	log.Printf("[agent] command finished id=%d type=%s status=%s", cmd.ID, cmd.Type, status)
+}
+
+func mustJSON(v any) json.RawMessage {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }

@@ -137,8 +137,14 @@ func (c *DashboardClient) ListRetention(ctx context.Context, projectID int) ([]s
 	return out, c.do(ctx, "GET", fmt.Sprintf("/api/agent/projects/%d/retention", projectID), nil, &out)
 }
 
-func (c *DashboardClient) Heartbeat(ctx context.Context, hb store.AgentHeartbeat) error {
-	return c.do(ctx, "POST", "/api/agent/heartbeat", hb, nil)
+func (c *DashboardClient) Heartbeat(ctx context.Context, hb store.AgentHeartbeat) ([]store.AgentCommand, error) {
+	var out struct {
+		Commands []store.AgentCommand `json:"commands"`
+	}
+	if err := c.do(ctx, "POST", "/api/agent/heartbeat", hb, &out); err != nil {
+		return nil, err
+	}
+	return out.Commands, nil
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -189,6 +195,16 @@ func (c *DashboardClient) UploadBackup(ctx context.Context, recordID int64, file
 		return fmt.Errorf("upload record=%d → %d: %s", recordID, resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+func (c *DashboardClient) FinishAgentCommand(ctx context.Context, id int64, status string, result json.RawMessage, logOutput, logRef, errorMsg string) error {
+	return c.do(ctx, "POST", fmt.Sprintf("/api/agent/commands/%d/finish", id), map[string]any{
+		"status":     status,
+		"result":     result,
+		"log_output": logOutput,
+		"log_ref":    logRef,
+		"error_msg":  errorMsg,
+	}, nil)
 }
 
 func (c *DashboardClient) DownloadBackup(ctx context.Context, recordID int64, destPath string) error {

@@ -404,6 +404,17 @@ function agentStatusBadge(agent) {
   return `<span class="badge ${cls}">${label}</span>`;
 }
 
+function agentVersionBadge(state, note = '') {
+  const map = {
+    up_to_date: ['badge-success', '最新版'],
+    outdated: ['badge-running', '待更新'],
+    unknown: ['', '未回報'],
+    no_release: ['badge-off', '無 Release'],
+  };
+  const [cls, label] = map[state] || ['', state || '—'];
+  return `<span class="badge ${cls}" ${note ? `title="${esc(note)}"` : ''}>${esc(label)}</span>`;
+}
+
 function executorLabel(p, agentMap = {}) {
   if (!p) return '—';
   if (p.executor_type === 'local') return '本機';
@@ -2317,7 +2328,11 @@ async function submitRestoreRecord(id) {
   if (strategy === 'overwrite' && confirmText !== 'RESTORE') { toast('覆蓋還原需輸入 RESTORE', 'warning'); return; }
   try {
     const res = await apiPost('/api/restore', { record_id: id, strategy, target, confirm: confirmText });
-    toast(`還原完成：${res.target || res.type || id}`, 'success');
+    if (res.status === 'queued') {
+      toast(`還原已排入佇列：${res.target || res.type || id}`, 'success');
+    } else {
+      toast(`還原完成：${res.target || res.type || id}`, 'success');
+    }
     closeModal();
   } catch(e) { toast(e.message, 'error'); }
 }
@@ -3970,6 +3985,41 @@ function renderAdmin() {
       <div id="admin-agents-panel"><div class="loading"><div class="spinner"></div>載入中...</div></div>
     </div>
     <div class="card sg">
+      <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Agent Command Logs</span>
+        <button class="btn btn-sm btn-secondary" onclick="loadAgentCommands()" id="agent-command-refresh-btn">↺ 重新整理</button>
+      </div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">Agent</label>
+          <select id="agent-command-agent-filter" class="form-input" onchange="loadAgentCommands()">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">狀態</label>
+          <select id="agent-command-status-filter" class="form-input" onchange="loadAgentCommands()">
+            <option value="">全部</option>
+            <option value="pending">pending</option>
+            <option value="running">running</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">類型</label>
+          <select id="agent-command-type-filter" class="form-input" onchange="loadAgentCommands()">
+            <option value="">全部</option>
+            <option value="trigger_backup">trigger_backup</option>
+            <option value="restore_backup">restore_backup</option>
+            <option value="reload_schedule">reload_schedule</option>
+            <option value="remove_schedule">remove_schedule</option>
+          </select>
+        </div>
+      </div>
+      <div id="agent-command-panel"><div class="loading"><div class="spinner"></div>載入中...</div></div>
+    </div>
+    <div class="card sg">
       <div class="card-title">Agent Release Artifact</div>
       <div style="font-size:13px;color:var(--text2);margin-bottom:14px">建置 linux-amd64 agent artifact。可選擇同步建立或更新 Agent 管理資料，避免安裝後還要手動補 agents 表。</div>
       <div id="agent-release-capability" class="form-hint" style="margin-bottom:14px">檢查 build 環境中...</div>
@@ -4174,6 +4224,7 @@ function renderAdmin() {
     </div>
   `);
   loadAdminAgents();
+  loadAgentCommands();
   loadAgentReleaseCapability();
   loadAgentReleases();
   // 載入磁碟狀況
@@ -4217,25 +4268,122 @@ async function loadAdminAgents() {
     el.innerHTML = `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>名稱</th><th>Code</th><th>狀態</th><th>版本</th><th>Base URL</th><th>最後心跳</th><th style="text-align:right">操作</th></tr></thead>
+          <thead><tr><th>名稱</th><th>Code</th><th>狀態</th><th>目前版本</th><th>最新 Release</th><th>更新狀態</th><th>Base URL</th><th>最後心跳</th><th style="text-align:right">操作</th></tr></thead>
           <tbody>${agents.map(a => `<tr>
             <td><strong>${esc(a.name)}</strong></td>
             <td><span class="mono">${esc(a.code)}</span></td>
             <td>${agentStatusBadge(a)}</td>
-            <td>${esc(a.version || '—')}</td>
+            <td><span class="mono">${esc(a.version || '—')}</span>${a.last_error ? `<div style="font-size:12px;color:var(--danger);margin-top:4px" title="${esc(a.last_error)}">last_error</div>` : ''}</td>
+            <td><span class="mono">${esc(a.latest_release_version || '—')}</span></td>
+            <td>${agentVersionBadge(a.version_state, a.version_note)}${a.version_note ? `<div style="font-size:12px;color:var(--text2);margin-top:4px">${esc(a.version_note)}</div>` : ''}</td>
             <td><span class="mono truncate" title="${esc(a.base_url)}">${esc(a.base_url)}</span></td>
             <td style="font-size:13px;white-space:nowrap">${fmtDate(a.last_seen_at)}</td>
             <td class="td-actions">
               <button class="btn btn-xs btn-ghost" onclick="showAgentConfig(${a.id},'${esc(a.name)}')">設定</button>
-              <button class="btn btn-xs btn-secondary" onclick="showAgentInstaller(${a.id},'${esc(a.name)}')">下載</button>
+              <button class="btn btn-xs btn-secondary" onclick="showAgentInstaller(${a.id},'${esc(a.name)}')">下載/升級</button>
               <button class="btn btn-xs btn-secondary" onclick="showAgentPreflight(${a.id},'${esc(a.name)}')">Preflight</button>
             </td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`;
+    const sel = document.getElementById('agent-command-agent-filter');
+    if (sel) {
+      const current = sel.value;
+      sel.innerHTML = '<option value="">全部</option>' + agents.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.code)})</option>`).join('');
+      sel.value = current;
+    }
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`;
+  }
+}
+
+function commandStatusBadge(status) {
+  const map = {
+    pending: ['badge-running', 'pending'],
+    running: ['badge-running', 'running'],
+    success: ['badge-success', 'success'],
+    failed: ['badge-failed', 'failed'],
+  };
+  const [cls, label] = map[status] || ['', status || '—'];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+async function loadAgentCommands() {
+  const el = document.getElementById('agent-command-panel');
+  if (!el) return;
+  el.innerHTML = '<div class="loading"><div class="spinner"></div>載入中...</div>';
+  try {
+    const agentId = document.getElementById('agent-command-agent-filter')?.value || '';
+    const status = document.getElementById('agent-command-status-filter')?.value || '';
+    const type = document.getElementById('agent-command-type-filter')?.value || '';
+    const qs = new URLSearchParams({ limit: '50' });
+    if (agentId) qs.set('agent_id', agentId);
+    if (status) qs.set('status', status);
+    if (type) qs.set('type', type);
+    const res = await apiGet(`/api/admin/agent-commands?${qs.toString()}`);
+    const commands = res.commands || [];
+    if (commands.length === 0) {
+      el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">🧾</div>尚無 agent command</div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Agent</th><th>類型</th><th>專案</th><th>狀態</th><th>建立時間</th><th>完成時間</th><th style="text-align:right">操作</th></tr></thead>
+          <tbody>${commands.map(cmd => `<tr>
+            <td><span class="mono">${cmd.id}</span></td>
+            <td><strong>${esc(cmd.agent_name || '—')}</strong><div style="font-size:12px;color:var(--text2)"><span class="mono">${esc(cmd.agent_code || '—')}</span></div></td>
+            <td><span class="mono">${esc(cmd.type)}</span></td>
+            <td>${esc(cmd.project_name || '—')}</td>
+            <td>${commandStatusBadge(cmd.status)}</td>
+            <td style="font-size:13px;white-space:nowrap">${fmtDate(cmd.created_at)}</td>
+            <td style="font-size:13px;white-space:nowrap">${fmtDate(cmd.finished_at)}</td>
+            <td class="td-actions"><button class="btn btn-xs btn-secondary" onclick="showAgentCommandDetail(${cmd.id})">詳情</button></td>
           </tr>`).join('')}</tbody>
         </table>
       </div>`;
   } catch(e) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`;
   }
+}
+
+async function showAgentCommandDetail(id) {
+  try {
+    const cmd = await apiGet(`/api/admin/agent-commands/${id}`);
+    openModal(`Agent Command #${cmd.id}`, `
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:13px;color:var(--text2)">
+          Agent：<strong>${esc(cmd.agent_name || '—')}</strong> <span class="mono">${esc(cmd.agent_code || '')}</span><br>
+          類型：<span class="mono">${esc(cmd.type || '—')}</span><br>
+          狀態：${commandStatusBadge(cmd.status)}<br>
+          建立：${fmtDate(cmd.created_at)}<br>
+          開始：${fmtDate(cmd.started_at)}<br>
+          完成：${fmtDate(cmd.finished_at)}<br>
+          嘗試次數：${esc(String(cmd.attempt_count || 0))}
+        </div>
+        <div>
+          <div class="form-label">Payload</div>
+          <textarea class="form-input mono" style="min-height:120px">${esc(JSON.stringify(cmd.payload || {}, null, 2))}</textarea>
+        </div>
+        <div>
+          <div class="form-label">Result</div>
+          <textarea class="form-input mono" style="min-height:120px">${esc(JSON.stringify(cmd.result || {}, null, 2))}</textarea>
+        </div>
+        <div>
+          <div class="form-label">Error</div>
+          <textarea class="form-input mono" style="min-height:72px">${esc(cmd.error_msg || '')}</textarea>
+        </div>
+        <div>
+          <div class="form-label">Log Ref</div>
+          <input class="form-input mono" value="${esc(cmd.log_ref || '')}">
+        </div>
+        <div>
+          <div class="form-label">Detailed Log</div>
+          <textarea class="form-input mono" style="min-height:260px">${esc(cmd.log_output || '')}</textarea>
+        </div>
+      </div>
+    `, `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`, true);
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 async function showAgentConfig(agentId, agentName) {
@@ -4394,9 +4542,27 @@ async function showAgentInstaller(agentId, agentName) {
         <div style="font-size:13px;color:var(--text2)">
           Agent Code：<span class="mono">${esc(res.agent?.code || '—')}</span><br>
           Base URL：<span class="mono">${esc(res.agent?.base_url || '—')}</span><br>
-          最新 Release：<span class="mono">${esc(rel?.version || '尚未建立')}</span>
+          目前版本：<span class="mono">${esc(res.current_version || '—')}</span><br>
+          最新 Release：<span class="mono">${esc(res.latest_version || rel?.version || '尚未建立')}</span><br>
+          這次安裝版本：<span class="mono">${esc(res.selected_version || rel?.version || '—')}</span><br>
+          更新狀態：${agentVersionBadge(res.version_state, res.version_note)}
         </div>
         ${rel ? `
+          <div>
+            <div class="form-label">VM 端下載並執行升級腳本</div>
+            <div style="display:flex;gap:8px">
+              <textarea id="agent-upgrade-command" class="form-input mono" style="min-height:88px">${esc(res.upgrade_command || '')}</textarea>
+              <button class="btn btn-secondary" onclick="copyText('agent-upgrade-command')">複製</button>
+            </div>
+            <div class="form-hint">這段 command 會先向 dashboard 下載 <code>upgrade-agent.sh</code>，再於 VM 端執行升級與重啟。升級後請回 admin 查看版本是否變成 ${esc(res.selected_version || rel.version)}。</div>
+          </div>
+          <div>
+            <div class="form-label">upgrade-agent.sh</div>
+            <div style="display:flex;gap:8px">
+              <textarea id="agent-upgrade-script" class="form-input mono" style="min-height:320px">${esc(res.upgrade_script || '')}</textarea>
+              <button class="btn btn-secondary" onclick="copyText('agent-upgrade-script')">複製</button>
+            </div>
+          </div>
           <div>
             <div class="form-label">Debian 一鍵安裝指令</div>
             <div style="display:flex;gap:8px">
@@ -4461,7 +4627,8 @@ async function showAgentInstaller(agentId, agentName) {
       </div>
     `, `
       <button class="btn btn-secondary" onclick="closeModal()">關閉</button>
-      ${rel?.download_url || res.download_url ? `<a class="btn btn-primary" href="${esc(res.download_url || '')}">下載 tar.gz</a>` : ''}
+      ${res.upgrade_script_url ? `<a class="btn btn-primary" href="${esc(res.upgrade_script_url)}">下載 upgrade-agent.sh</a>` : ''}
+      ${rel?.download_url || res.download_url ? `<a class="btn btn-secondary" href="${esc(res.download_url || '')}">下載 tar.gz</a>` : ''}
     `, true);
   } catch(e) { toast(e.message, 'error'); }
 }

@@ -371,8 +371,15 @@ func (h *projectHandler) detachSchedule(ctx context.Context, project *store.Proj
 		if err != nil {
 			return err
 		}
-		h.notifyAgent(agent, scheduleID, "remove")
-		return nil
+		payload, _ := json.Marshal(ScheduleCommandPayload{ScheduleID: scheduleID})
+		_, err = enqueueAgentCommand(ctx, h.store, &store.AgentCommand{
+			AgentID:    agent.ID,
+			ProjectID:  &project.ID,
+			ScheduleID: &scheduleID,
+			Type:       store.AgentCommandTypeRemoveSchedule,
+			Payload:    payload,
+		})
+		return err
 	}
 	if h.scheduler != nil {
 		h.scheduler.Remove(scheduleID)
@@ -389,31 +396,20 @@ func (h *projectHandler) attachSchedule(ctx context.Context, project *store.Proj
 		if err != nil {
 			return err
 		}
-		h.notifyAgent(agent, scheduleID, "reload")
-		return nil
+		payload, _ := json.Marshal(ScheduleCommandPayload{ScheduleID: scheduleID})
+		_, err = enqueueAgentCommand(ctx, h.store, &store.AgentCommand{
+			AgentID:    agent.ID,
+			ProjectID:  &project.ID,
+			ScheduleID: &scheduleID,
+			Type:       store.AgentCommandTypeReloadSchedule,
+			Payload:    payload,
+		})
+		return err
 	}
 	if h.scheduler == nil {
 		return nil
 	}
 	return h.scheduler.Reload(ctx, scheduleID)
-}
-
-func (h *projectHandler) notifyAgent(agent *store.Agent, scheduleID int, action string) {
-	go func() {
-		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			fmt.Sprintf("%s/schedules/%d/%s", agent.BaseURL, scheduleID, action), nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Agent-Code", agent.Code)
-		req.Header.Set("X-Agent-Token", agent.TokenHash)
-		cl := &http.Client{Timeout: 5 * time.Second}
-		resp, err := cl.Do(req)
-		if err == nil && resp != nil {
-			resp.Body.Close()
-		}
-	}()
 }
 
 // pathID 從 {id} path value 解析整數

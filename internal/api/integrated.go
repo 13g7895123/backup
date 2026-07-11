@@ -376,8 +376,17 @@ func (h *integratedHandler) runProject(ctx context.Context, projectID int, targe
 			log.Printf("%s id=%d executor agent 未啟用", logPrefix, projectID)
 			return
 		}
-		if err := forwardToAgent(agent.BaseURL, agent.Code, agent.TokenHash, projectID, targetType); err != nil {
-			log.Printf("%s id=%d 轉發 agent 失敗: %v", logPrefix, projectID, err)
+		payload, _ := json.Marshal(TriggerBackupCommandPayload{
+			ProjectID:  projectID,
+			TargetType: targetType,
+		})
+		if _, err := enqueueAgentCommand(ctx, h.store, &store.AgentCommand{
+			AgentID:   agent.ID,
+			ProjectID: &projectID,
+			Type:      store.AgentCommandTypeTriggerBackup,
+			Payload:   payload,
+		}); err != nil {
+			log.Printf("%s id=%d 建立 agent command 失敗: %v", logPrefix, projectID, err)
 			return
 		}
 		return

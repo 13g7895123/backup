@@ -60,6 +60,7 @@ func RegisterAgentRoutes(mux *http.ServeMux, s *store.Store) {
 	h := &agentHandler{store: s}
 
 	mux.HandleFunc("POST /api/agent/heartbeat", agentMiddleware(s, h.heartbeat))
+	mux.HandleFunc("POST /api/agent/commands/{id}/finish", agentMiddleware(s, h.finishCommand))
 	mux.HandleFunc("GET /api/agent/schedules/enabled", agentMiddleware(s, h.listEnabledSchedules))
 	mux.HandleFunc("GET /api/agent/schedules/{id}", agentMiddleware(s, h.getSchedule))
 	mux.HandleFunc("POST /api/agent/schedules/{id}/runtime", agentMiddleware(s, h.updateRuntime))
@@ -102,7 +103,73 @@ func (h *agentHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	commands, err := h.store.ClaimPendingAgentCommands(r.Context(), agent.ID, 10)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, agentHeartbeatResponse{
+		Agent:    updated,
+		Commands: commands,
+	})
+}
+
+func (h *agentHandler) finishCommand(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 command id")
+		return
+	}
+	cmd, err := h.store.GetAgentCommand(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到 command")
+		return
+	}
+	if cmd.AgentID != agent.ID {
+		writeError(w, http.StatusForbidden, "command not assigned to agent")
+		return
+	}
+	var body agentCommandFinishRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 JSON")
+		return
+	}
+	cmd.Status = body.Status
+	cmd.Result = body.Result
+	cmd.LogOutput = body.LogOutput
+	cmd.LogRef = body.LogRef
+	cmd.ErrorMsg = body.ErrorMsg
+	if cmd.Status == "" {
+		cmd.Status = store.AgentCommandStatusSuccess
+	}
+	if err := h.store.FinishAgentCommand(r.Context(), cmd); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if cmd.RestoreRecordID != nil {
+		snapshotPath := ""
+		if len(cmd.Result) > 0 {
+			var result map[string]any
+			if err := json.Unmarshal(cmd.Result, &result); err == nil {
+				if v, _ := result["snapshot_path"].(string); v != "" {
+					snapshotPath = v
+				}
+			}
+		}
+		restoreStatus := "success"
+		if cmd.Status != store.AgentCommandStatusSuccess {
+			restoreStatus = "failed"
+		}
+		if err := h.store.FinishRestoreRecord(r.Context(), *cmd.RestoreRecordID, restoreStatus, snapshotPath, cmd.ErrorMsg); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 func (h *agentHandler) listEnabledSchedules(w http.ResponseWriter, r *http.Request) {

@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -106,6 +104,7 @@ func (h *restoreHandler) restore(w http.ResponseWriter, r *http.Request) {
 		restoreRec.AgentID = &agent.ID
 		restoreRec.AgentName = agent.Name
 		restoreRec.RunHost = agent.HostName
+		restoreRec.Status = "pending"
 	}
 	restoreID, err := h.store.CreateRestoreRecord(r.Context(), restoreRec)
 	if err != nil {
@@ -115,7 +114,40 @@ func (h *restoreHandler) restore(w http.ResponseWriter, r *http.Request) {
 
 	var out map[string]any
 	if agent != nil {
-		out, err = forwardRestoreToAgent(r.Context(), agent, req)
+		payload, _ := json.Marshal(RestoreBackupCommandPayload{
+			RecordID:  req.RecordID,
+			RestoreID: restoreID,
+			Strategy:  req.Strategy,
+			Target:    req.Target,
+			Confirm:   req.Confirm,
+		})
+		cmd, cmdErr := enqueueAgentCommand(r.Context(), h.store, &store.AgentCommand{
+			AgentID:         agent.ID,
+			ProjectID:       rec.ProjectID,
+			RestoreRecordID: &restoreID,
+			Type:            store.AgentCommandTypeRestoreBackup,
+			Payload:         payload,
+		})
+		if cmdErr != nil {
+			h.store.FinishRestoreRecord(r.Context(), restoreID, "failed", "", cmdErr.Error()) //nolint
+			writeError(w, http.StatusInternalServerError, "建立 restore command 失敗: "+cmdErr.Error())
+			return
+		}
+		out = map[string]any{
+			"status":      "queued",
+			"record_id":   req.RecordID,
+			"restore_id":  restoreID,
+			"command_id":  cmd.ID,
+			"type":        rec.Type,
+			"strategy":    req.Strategy,
+			"target":      req.Target,
+			"agent_id":    agent.ID,
+			"agent_name":  agent.Name,
+			"queued_at":   time.Now(),
+			"executor":    "agent",
+		}
+		writeJSON(w, http.StatusAccepted, out)
+		return
 	} else {
 		out, err = h.restoreLocal(r.Context(), rec, project, req)
 	}
@@ -223,38 +255,6 @@ func (h *restoreHandler) restoreLocal(ctx context.Context, rec *store.BackupReco
 		"target":        restoreTarget,
 		"snapshot_path": snapshotPath,
 	}, nil
-}
-
-func forwardRestoreToAgent(ctx context.Context, agent *store.Agent, payload any) (map[string]any, error) {
-	body, _ := json.Marshal(payload)
-	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, "POST", agent.BaseURL+"/restore", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-Code", agent.Code)
-	req.Header.Set("X-Agent-Token", agent.TokenHash)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("連線 agent 失敗: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("agent 回應 %d: %s", resp.StatusCode, string(respBody))
-	}
-	var out map[string]any
-	if len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, &out); err != nil {
-			return nil, err
-		}
-	}
-	if out == nil {
-		out = map[string]any{"status": "restored"}
-	}
-	return out, nil
 }
 
 func applyProjectDatabaseDefaults(project *store.Project, cfg *backup.DatabaseConfig) {

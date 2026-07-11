@@ -597,14 +597,17 @@ func (s *Store) DeleteRecord(ctx context.Context, id int64) (string, error) {
 }
 
 func (s *Store) CreateRestoreRecord(ctx context.Context, r *RestoreRecord) (int64, error) {
+	if r.Status == "" {
+		r.Status = "running"
+	}
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO restore_records
 		  (backup_record_id, project_id, project_name, type, strategy, target, status,
 		   agent_id, agent_name, run_host)
-		VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		RETURNING id`,
 		r.BackupRecordID, r.ProjectID, r.ProjectName, r.Type, r.Strategy, r.Target,
-		r.AgentID, r.AgentName, r.RunHost).Scan(&r.ID)
+		r.Status, r.AgentID, r.AgentName, r.RunHost).Scan(&r.ID)
 	return r.ID, err
 }
 

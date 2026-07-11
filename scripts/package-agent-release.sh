@@ -120,7 +120,7 @@ cleanup() {
 trap cleanup ERR
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  bash "${ROOT}/scripts/build-agent.sh"
+  AGENT_VERSION="${VERSION}" bash "${ROOT}/scripts/build-agent.sh"
 fi
 
 require_file "${ROOT_BINARY}"

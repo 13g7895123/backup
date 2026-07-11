@@ -1,17 +1,15 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
-	"time"
 
 	"backup-manager/internal/scheduler"
 	"backup-manager/internal/store"
+	"github.com/robfig/cron/v3"
 )
 
 type scheduleHandler struct {
@@ -33,37 +31,6 @@ func RegisterScheduleRoutes(mux *http.ServeMux, s *store.Store, sc *scheduler.Dy
 	mux.HandleFunc("GET /api/schedules/all", h.listAll)
 }
 
-func (h *scheduleHandler) notifyAgent(agent *store.Agent, scheduleID int, action string) {
-	go func() {
-		var body []byte
-		if action == "reload" {
-			body, _ = json.Marshal(map[string]int{"id": scheduleID})
-		}
-		var reqBody *bytes.Reader
-		if len(body) > 0 {
-			reqBody = bytes.NewReader(body)
-		} else {
-			reqBody = bytes.NewReader(nil)
-		}
-		req, err := http.NewRequestWithContext(context.Background(), "POST",
-			fmt.Sprintf("%s/schedules/%d/%s", agent.BaseURL, scheduleID, action), reqBody)
-		if err != nil {
-			log.Printf("[schedules] notify agent=%s schedule=%d action=%s err=%v", agent.Code, scheduleID, action, err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Agent-Code", agent.Code)
-		req.Header.Set("X-Agent-Token", agent.TokenHash)
-		cl := &http.Client{Timeout: 5 * time.Second}
-		resp, err := cl.Do(req)
-		if err != nil {
-			log.Printf("[schedules] notify agent=%s schedule=%d action=%s err=%v", agent.Code, scheduleID, action, err)
-			return
-		}
-		resp.Body.Close()
-	}()
-}
-
 func (h *scheduleHandler) reloadSchedule(ctx context.Context, scheduleID int) error {
 	sch, err := h.store.GetSchedule(ctx, scheduleID)
 	if err != nil {
@@ -81,8 +48,15 @@ func (h *scheduleHandler) reloadSchedule(ctx context.Context, scheduleID int) er
 		if err != nil {
 			return err
 		}
-		h.notifyAgent(agent, scheduleID, "reload")
-		return nil
+		payload, _ := json.Marshal(ScheduleCommandPayload{ScheduleID: scheduleID})
+		_, err = enqueueAgentCommand(ctx, h.store, &store.AgentCommand{
+			AgentID:    agent.ID,
+			ProjectID:  &project.ID,
+			ScheduleID: &scheduleID,
+			Type:       store.AgentCommandTypeReloadSchedule,
+			Payload:    payload,
+		})
+		return err
 	}
 	return h.scheduler.Reload(ctx, scheduleID)
 }
@@ -100,8 +74,15 @@ func (h *scheduleHandler) removeSchedule(ctx context.Context, sch *store.Schedul
 		if err != nil {
 			return err
 		}
-		h.notifyAgent(agent, sch.ID, "remove")
-		return nil
+		payload, _ := json.Marshal(ScheduleCommandPayload{ScheduleID: sch.ID})
+		_, err = enqueueAgentCommand(ctx, h.store, &store.AgentCommand{
+			AgentID:    agent.ID,
+			ProjectID:  &project.ID,
+			ScheduleID: &sch.ID,
+			Type:       store.AgentCommandTypeRemoveSchedule,
+			Payload:    payload,
+		})
+		return err
 	}
 	h.scheduler.Remove(sch.ID)
 	return nil
@@ -134,6 +115,10 @@ func (h *scheduleHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if sch.CronExpr == "" {
 		writeError(w, http.StatusBadRequest, "cron_expr 不可為空")
+		return
+	}
+	if _, err := cron.ParseStandard(sch.CronExpr); err != nil {
+		writeError(w, http.StatusBadRequest, "排程格式無效: "+err.Error())
 		return
 	}
 	if len(sch.TargetTypes) == 0 {
@@ -180,6 +165,10 @@ func (h *scheduleHandler) update(w http.ResponseWriter, r *http.Request) {
 	var sch store.Schedule
 	if err := json.NewDecoder(r.Body).Decode(&sch); err != nil {
 		writeError(w, http.StatusBadRequest, "無效的 JSON: "+err.Error())
+		return
+	}
+	if _, err := cron.ParseStandard(sch.CronExpr); err != nil {
+		writeError(w, http.StatusBadRequest, "排程格式無效: "+err.Error())
 		return
 	}
 	sch.ID = sid

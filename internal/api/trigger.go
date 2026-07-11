@@ -1,15 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
-	"time"
 
 	"backup-manager/internal/backup"
 	"backup-manager/internal/store"
@@ -71,15 +68,26 @@ func (h *triggerHandler) trigger(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "executor agent 未啟用")
 			return
 		}
-		if err := forwardToAgent(agent.BaseURL, agent.Code, agent.TokenHash, req.ProjectID, req.TargetType); err != nil {
-			writeError(w, http.StatusBadGateway, "轉發 agent 失敗: "+err.Error())
+		payload, _ := json.Marshal(TriggerBackupCommandPayload{
+			ProjectID:  req.ProjectID,
+			TargetType: req.TargetType,
+		})
+		cmd, err := enqueueAgentCommand(r.Context(), h.store, &store.AgentCommand{
+			AgentID:   agent.ID,
+			ProjectID: &req.ProjectID,
+			Type:      store.AgentCommandTypeTriggerBackup,
+			Payload:   payload,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "建立 agent command 失敗: "+err.Error())
 			return
 		}
-		log.Printf("[trigger] 已轉發至 agent=%s project_id=%d type=%s", agent.Code, req.ProjectID, req.TargetType)
+		log.Printf("[trigger] 已排入 agent command id=%d agent=%s project_id=%d type=%s", cmd.ID, agent.Code, req.ProjectID, req.TargetType)
 		response["executor_type"] = "agent"
 		response["agent_id"] = agent.ID
 		response["agent_name"] = agent.Name
-		response["message"] = "備份已交由 " + agent.Name + " 執行"
+		response["command_id"] = cmd.ID
+		response["message"] = "備份已排入 " + agent.Name + " 的待執行佇列"
 	} else {
 		h.runLocal(req)
 		response["executor_type"] = "local"
@@ -143,17 +151,26 @@ func (h *triggerHandler) testBackup(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "executor agent 未啟用")
 			return
 		}
-		if err := forwardToAgentEndpoint(agent.BaseURL, "/test-backup", agent.Code, agent.TokenHash, map[string]any{
-			"project_id":  projectID,
-			"target_type": body.TargetType,
-		}); err != nil {
-			writeError(w, http.StatusBadGateway, "轉發 agent 失敗: "+err.Error())
+		payload, _ := json.Marshal(TriggerBackupCommandPayload{
+			ProjectID:  projectID,
+			TargetType: body.TargetType,
+			Smoke:      true,
+		})
+		cmd, err := enqueueAgentCommand(r.Context(), h.store, &store.AgentCommand{
+			AgentID:   agent.ID,
+			ProjectID: &projectID,
+			Type:      store.AgentCommandTypeTriggerBackup,
+			Payload:   payload,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "建立 agent command 失敗: "+err.Error())
 			return
 		}
 		response["executor_type"] = "agent"
 		response["agent_id"] = agent.ID
 		response["agent_name"] = agent.Name
-		response["message"] = "smoke backup 已交由 " + agent.Name + " 執行"
+		response["command_id"] = cmd.ID
+		response["message"] = "smoke backup 已排入 " + agent.Name + " 的待執行佇列"
 	} else {
 		go func() {
 			err := h.runner.RunProjectWithOptions(context.Background(), projectID, []string{body.TargetType}, backup.RunOptions{
@@ -170,39 +187,4 @@ func (h *triggerHandler) testBackup(w http.ResponseWriter, r *http.Request) {
 		response["message"] = "smoke backup 已由本機開始執行"
 	}
 	writeJSON(w, http.StatusAccepted, response)
-}
-
-// forwardToAgent 將 trigger 請求轉發給 host agent 的 HTTP server
-func forwardToAgent(agentURL, agentCode, token string, projectID int, targetType string) error {
-	return forwardToAgentEndpoint(agentURL, "/trigger", agentCode, token, map[string]any{
-		"project_id":  projectID,
-		"target_type": targetType,
-	})
-}
-
-func forwardToAgentEndpoint(agentURL, path, agentCode, token string, payload map[string]any) error {
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		fmt.Sprintf("%s%s", agentURL, path), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if agentCode != "" {
-		req.Header.Set("X-Agent-Code", agentCode)
-	}
-	if token != "" {
-		req.Header.Set("X-Agent-Token", token)
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("連線 agent 失敗: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("agent 回應 %d: %s", resp.StatusCode, string(b))
-	}
-	return nil
 }

@@ -494,7 +494,7 @@ func buildReleaseFromCapability(ctx context.Context, releaseDir, version string,
 	}()
 
 	logger.Printf("run build script workdir=%s script=%s", capability.Workdir, capability.Script)
-	if err := runBuildScript(ctx, capability.Workdir, capability.Script, logger); err != nil {
+	if err := runBuildScript(ctx, capability.Workdir, capability.Script, version, logger); err != nil {
 		return nil, err
 	}
 
@@ -738,9 +738,10 @@ func (h *releaseHandler) readManifest(version string) (*agentReleaseManifest, er
 	return &manifest, nil
 }
 
-func runBuildScript(ctx context.Context, workdir, script string, logger *log.Logger) error {
+func runBuildScript(ctx context.Context, workdir, script, version string, logger *log.Logger) error {
 	cmd := exec.CommandContext(ctx, "bash", script)
 	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(), "AGENT_VERSION="+version)
 	output, err := cmd.CombinedOutput()
 	if logger != nil {
 		if trimmed := strings.TrimSpace(string(output)); trimmed != "" {

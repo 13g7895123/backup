@@ -28,6 +28,7 @@ func RegisterAgentsRoutes(mux *http.ServeMux, s *store.Store) {
 	mux.HandleFunc("GET /api/agents/{id}/config", h.getConfig)
 	mux.HandleFunc("POST /api/agents/{id}/config", h.updateConfig)
 	mux.HandleFunc("GET /api/agents/{id}/installer", h.getInstaller)
+	mux.HandleFunc("GET /api/agents/{id}/upgrade-script", h.getUpgradeScript)
 	mux.HandleFunc("GET /api/nas-targets", h.listNASTargets)
 	mux.HandleFunc("POST /api/agents/{id}/test/preflight", h.preflightTest)
 }
@@ -58,6 +59,11 @@ type agentInstallPayload struct {
 	Agent            *store.Agent        `json:"agent"`
 	AgentConfig      agentConfigPayload  `json:"agent_config"`
 	Release          *agentReleaseDetail `json:"release,omitempty"`
+	CurrentVersion   string              `json:"current_version,omitempty"`
+	LatestVersion    string              `json:"latest_version,omitempty"`
+	SelectedVersion  string              `json:"selected_version,omitempty"`
+	VersionState     string              `json:"version_state,omitempty"`
+	VersionNote      string              `json:"version_note,omitempty"`
 	InstallCommand   string              `json:"install_command,omitempty"`
 	ProcessCommand   string              `json:"process_command,omitempty"`
 	ApplyCommand     string              `json:"apply_command,omitempty"`
@@ -65,10 +71,20 @@ type agentInstallPayload struct {
 	DownloadURL      string              `json:"download_url,omitempty"`
 	ChecksumURL      string              `json:"checksum_url,omitempty"`
 	InstallScriptURL string              `json:"install_script_url,omitempty"`
+	UpgradeScriptURL string              `json:"upgrade_script_url,omitempty"`
+	UpgradeScript    string              `json:"upgrade_script,omitempty"`
+	UpgradeCommand   string              `json:"upgrade_command,omitempty"`
 	ConfigContent    string              `json:"config_content,omitempty"`
 	InstallScript    string              `json:"install_script,omitempty"`
 	ServiceContent   string              `json:"service_content,omitempty"`
 	DiagnoseScript   string              `json:"diagnose_script,omitempty"`
+}
+
+type agentListItem struct {
+	store.Agent
+	LatestReleaseVersion string `json:"latest_release_version,omitempty"`
+	VersionState         string `json:"version_state,omitempty"`
+	VersionNote          string `json:"version_note,omitempty"`
 }
 
 func (h *agentsHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +93,18 @@ func (h *agentsHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, agents)
+	release, _ := latestAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), r)
+	items := make([]agentListItem, 0, len(agents))
+	for i := range agents {
+		state, note := agentVersionState(&agents[i], release)
+		items = append(items, agentListItem{
+			Agent:                agents[i],
+			LatestReleaseVersion: releaseVersionOrEmpty(release),
+			VersionState:         state,
+			VersionNote:          note,
+		})
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (h *agentsHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +118,14 @@ func (h *agentsHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "找不到 agent")
 		return
 	}
-	writeJSON(w, http.StatusOK, agent)
+	release, _ := latestAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), r)
+	state, note := agentVersionState(agent, release)
+	writeJSON(w, http.StatusOK, agentListItem{
+		Agent:                *agent,
+		LatestReleaseVersion: releaseVersionOrEmpty(release),
+		VersionState:         state,
+		VersionNote:          note,
+	})
 }
 
 func (h *agentsHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -286,26 +320,57 @@ func (h *agentsHandler) getInstaller(w http.ResponseWriter, r *http.Request) {
 	payload := agentInstallPayload{
 		Agent:          agentRow,
 		AgentConfig:    cfg,
+		CurrentVersion: strings.TrimSpace(agentRow.Version),
 		ApplyCommand:   cfg.ApplyCommand,
 		RestartCommand: cfg.RestartCommand,
 		ConfigContent:  cfg.EnvContent,
 	}
 
-	release, err := latestAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), r)
+	release, err := resolveAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), strings.TrimSpace(r.URL.Query().Get("version")), r)
 	if err != nil {
+		payload.VersionState = "no_release"
+		payload.VersionNote = "尚未建立任何 agent release"
 		writeJSON(w, http.StatusOK, payload)
 		return
 	}
 	payload.Release = release
+	payload.LatestVersion = latestAgentReleaseVersion(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"))
+	payload.SelectedVersion = release.Version
+	payload.VersionState, payload.VersionNote = agentVersionState(agentRow, release)
 	payload.ProcessCommand = buildDebianProcessCommand(release, cfg)
 	payload.InstallCommand = payload.ProcessCommand
 	payload.DownloadURL = releaseAssetURL(release, ".tar.gz")
 	payload.ChecksumURL = releaseAssetURL(release, "_checksums.txt")
 	payload.InstallScriptURL = releaseAssetURL(release, "install-agent.sh")
+	payload.UpgradeScriptURL = fmt.Sprintf("%s/api/agents/%d/upgrade-script?version=%s", baseURL(r), agentRow.ID, release.Version)
+	payload.UpgradeScript = buildDebianUpgradeScript(release, agentRow)
+	payload.UpgradeCommand = buildUpgradeScriptCommand(payload.UpgradeScriptURL)
 	payload.InstallScript = readReleaseTextAsset(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), release.Version, "install-agent.sh")
 	payload.ServiceContent = readReleaseTextAsset(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), release.Version, "backup-agent.service")
 	payload.DiagnoseScript = readReleaseTextAsset(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), release.Version, "diagnose-agent.sh")
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (h *agentsHandler) getUpgradeScript(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r, "id")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 id")
+		return
+	}
+	agentRow, err := h.store.GetAgent(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到 agent")
+		return
+	}
+	release, err := resolveAgentReleaseDetail(envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), strings.TrimSpace(r.URL.Query().Get("version")), r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "找不到 agent release")
+		return
+	}
+	fileName := fmt.Sprintf("upgrade-agent-%s-%s.sh", sanitizeReleaseToken(agentRow.Code), sanitizeReleaseToken(release.Version))
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+	_, _ = io.WriteString(w, buildDebianUpgradeScript(release, agentRow))
 }
 
 func (h *agentsHandler) preflightTest(w http.ResponseWriter, r *http.Request) {
@@ -558,6 +623,70 @@ sudo AGENT_BINARY_SRC=./backup-agent-linux-amd64 ./install-agent.sh
 `, shQuote(tarName), shQuote(tarURL), shQuote(tarName), shQuote(extractDir), cfg.EnvContent))
 }
 
+func buildDebianUpgradeScript(rel *agentReleaseDetail, agentRow *store.Agent) string {
+	if rel == nil {
+		return ""
+	}
+	tarURL := releaseAssetURL(rel, ".tar.gz")
+	checksumURL := releaseAssetURL(rel, "_checksums.txt")
+	if tarURL == "" {
+		return ""
+	}
+	tarName := filepath.Base(tarURL)
+	checksumName := filepath.Base(checksumURL)
+	extractDir := strings.TrimSuffix(tarName, ".tar.gz")
+	expectedVersion := rel.Version
+	return strings.TrimSpace(fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION=%s
+TAR_URL=%s
+CHECKSUM_URL=%s
+TAR_NAME=%s
+CHECKSUM_NAME=%s
+EXTRACT_DIR=%s
+TMPDIR="$(mktemp -d)"
+
+cleanup() {
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+
+echo "[upgrade] agent=%s target_version=${VERSION}"
+sudo apt-get update
+sudo apt-get install -y curl tar ca-certificates
+
+cd "$TMPDIR"
+curl -fsSLo "$TAR_NAME" "$TAR_URL"
+if [[ -n "$CHECKSUM_URL" ]]; then
+  curl -fsSLo "$CHECKSUM_NAME" "$CHECKSUM_URL"
+  if command -v sha256sum >/dev/null 2>&1; then
+    grep "  ${TAR_NAME}$" "$CHECKSUM_NAME" | sha256sum -c -
+  fi
+fi
+
+tar -xzf "$TAR_NAME"
+cd "$EXTRACT_DIR"
+sudo AGENT_BINARY_SRC=./backup-agent-linux-amd64 ./install-agent.sh
+
+echo "[upgrade] service status"
+sudo systemctl --no-pager --full status backup-agent || true
+
+echo "[upgrade] recent logs"
+sudo journalctl -u backup-agent -n 40 --no-pager || true
+
+echo "[upgrade] expected heartbeat version: ${VERSION}"
+echo "[upgrade] dashboard should show agent version updated after next heartbeat"
+`, shQuote(expectedVersion), shQuote(tarURL), shQuote(checksumURL), shQuote(tarName), shQuote(checksumName), shQuote(extractDir), shQuote(agentRow.Code))) + "\n"
+}
+
+func buildUpgradeScriptCommand(scriptURL string) string {
+	if strings.TrimSpace(scriptURL) == "" {
+		return ""
+	}
+	return fmt.Sprintf("curl -fsSL %s -o backup-agent-upgrade.sh && bash backup-agent-upgrade.sh", shQuote(scriptURL))
+}
+
 func readReleaseTextAsset(rootDir, version, fileName string) string {
 	if strings.TrimSpace(rootDir) == "" || strings.TrimSpace(version) == "" || strings.TrimSpace(fileName) == "" {
 		return ""
@@ -585,4 +714,81 @@ func previewToken(token string) string {
 		return token
 	}
 	return token[:3] + "..." + token[len(token)-3:]
+}
+
+func resolveAgentReleaseDetail(rootDir, version string, r *http.Request) (*agentReleaseDetail, error) {
+	if strings.TrimSpace(version) == "" {
+		return latestAgentReleaseDetail(rootDir, r)
+	}
+	manifestPath := filepath.Join(rootDir, version, "manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	var manifest agentReleaseManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return nil, err
+	}
+	detail := &agentReleaseDetail{
+		agentReleaseManifest: manifest,
+		InstallCommand:       (&releaseHandler{}).installCommand(r, manifest.Version),
+		UpgradeCommand:       (&releaseHandler{}).installCommand(r, manifest.Version),
+	}
+	for i := range detail.Files {
+		detail.Files[i].DownloadURL = fmt.Sprintf("%s/api/admin/agent-releases/%s/download/%s", baseURL(r), manifest.Version, detail.Files[i].Name)
+	}
+	return detail, nil
+}
+
+func latestAgentReleaseVersion(rootDir string) string {
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return ""
+	}
+	var (
+		latestVersion string
+		latestBuiltAt time.Time
+	)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(rootDir, entry.Name(), "manifest.json"))
+		if err != nil {
+			continue
+		}
+		var manifest agentReleaseManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			continue
+		}
+		if latestVersion == "" || manifest.BuiltAt.After(latestBuiltAt) {
+			latestVersion = manifest.Version
+			latestBuiltAt = manifest.BuiltAt
+		}
+	}
+	return latestVersion
+}
+
+func releaseVersionOrEmpty(rel *agentReleaseDetail) string {
+	if rel == nil {
+		return ""
+	}
+	return rel.Version
+}
+
+func agentVersionState(agentRow *store.Agent, release *agentReleaseDetail) (string, string) {
+	if release == nil {
+		return "no_release", "尚未建立 release"
+	}
+	current := strings.TrimSpace(agentRow.Version)
+	if current == "" {
+		return "unknown", "agent 尚未回報版本"
+	}
+	if current == "dev" {
+		return "unknown", "agent 仍使用未標版 binary"
+	}
+	if current == release.Version {
+		return "up_to_date", "已是最新版本"
+	}
+	return "outdated", fmt.Sprintf("目前 %s，最新 %s", current, release.Version)
 }
