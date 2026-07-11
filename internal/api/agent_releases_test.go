@@ -1,9 +1,15 @@
 package api
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -104,4 +110,166 @@ func TestBuildReleaseCleansUpOnFailure(t *testing.T) {
 	if _, statErr := os.Stat(releaseDir); !os.IsNotExist(statErr) {
 		t.Fatalf("expected release dir to be removed, stat err=%v", statErr)
 	}
+}
+
+func TestImportReleaseBundleSuccess(t *testing.T) {
+	rootDir := t.TempDir()
+	h := &releaseHandler{rootDir: rootDir}
+
+	bundle := makeReleaseBundle(t, "1.2.3", map[string]string{
+		"backup-agent-linux-amd64":               "binary",
+		"backup-agent_1.2.3_linux_amd64.tar.gz":  "tarball",
+		"backup-agent_1.2.3_checksums.txt":       "checksums",
+		"install-agent.sh":                       "#!/usr/bin/env bash\n",
+		"diagnose-agent.sh":                      "#!/usr/bin/env bash\n",
+		"backup-agent.service":                   "[Service]\n",
+		"manifest.json":                          releaseManifestJSON(t, "1.2.3"),
+	})
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("version", "1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("bundle", "release.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/admin/agent-releases/import", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+
+	h.importRelease(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("unexpected status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var detail agentReleaseDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Version != "1.2.3" {
+		t.Fatalf("unexpected version: %s", detail.Version)
+	}
+	if len(detail.Files) != 6 {
+		t.Fatalf("unexpected files count: %d", len(detail.Files))
+	}
+	if detail.LogRef == "" {
+		t.Fatal("expected log_ref to be populated")
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, "1.2.3", "manifest.json")); err != nil {
+		t.Fatalf("expected imported manifest: %v", err)
+	}
+}
+
+func TestImportReleaseBundleMissingRequiredFile(t *testing.T) {
+	rootDir := t.TempDir()
+	h := &releaseHandler{rootDir: rootDir}
+
+	bundle := makeReleaseBundle(t, "1.2.4", map[string]string{
+		"backup-agent-linux-amd64":               "binary",
+		"backup-agent_1.2.4_linux_amd64.tar.gz":  "tarball",
+		"backup-agent_1.2.4_checksums.txt":       "checksums",
+		"install-agent.sh":                       "#!/usr/bin/env bash\n",
+		"backup-agent.service":                   "[Service]\n",
+		"manifest.json":                          releaseManifestJSON(t, "1.2.4"),
+	})
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("version", "1.2.4"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("bundle", "release.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/admin/agent-releases/import", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+
+	h.importRelease(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "release 缺少必要檔案: diagnose-agent.sh") {
+		t.Fatalf("unexpected body=%s", rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, "1.2.4")); !os.IsNotExist(err) {
+		t.Fatalf("expected release dir absent, stat err=%v", err)
+	}
+}
+
+func makeReleaseBundle(t *testing.T, version string, files map[string]string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	writeTarDir(t, tw, version)
+	for name, content := range files {
+		fullName := version + "/" + name
+		hdr := &tar.Header{
+			Name: fullName,
+			Mode: 0644,
+			Size: int64(len(content)),
+		}
+		if strings.HasSuffix(name, ".sh") || name == "backup-agent-linux-amd64" {
+			hdr.Mode = 0755
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func writeTarDir(t *testing.T, tw *tar.Writer, name string) {
+	t.Helper()
+	if err := tw.WriteHeader(&tar.Header{Name: name + "/", Mode: 0755, Typeflag: tar.TypeDir}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func releaseManifestJSON(t *testing.T, version string) string {
+	t.Helper()
+	manifest := agentReleaseManifest{
+		Version: version,
+		Files: []agentReleaseFile{
+			{Name: "backup-agent-linux-amd64", OS: "linux", Arch: "amd64"},
+			{Name: "backup-agent_" + version + "_linux_amd64.tar.gz", OS: "linux", Arch: "amd64"},
+			{Name: "install-agent.sh"},
+			{Name: "diagnose-agent.sh"},
+			{Name: "backup-agent.service"},
+			{Name: "backup-agent_" + version + "_checksums.txt"},
+		},
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }

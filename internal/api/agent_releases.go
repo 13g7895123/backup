@@ -69,6 +69,8 @@ var releaseVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 var agentReleaseBuildLimiter = make(chan struct{}, 1)
 
+const agentReleaseImportMaxBytes = 2 << 30
+
 type agentReleaseBuildRequest struct {
 	Version       string              `json:"version"`
 	RegisterAgent *agentConfigPayload `json:"register_agent,omitempty"`
@@ -78,6 +80,7 @@ func RegisterAgentReleaseRoutes(mux *http.ServeMux, s *store.Store) {
 	h := &releaseHandler{rootDir: envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), store: s}
 	mux.HandleFunc("GET /api/admin/agent-releases/capability", h.capability)
 	mux.HandleFunc("POST /api/admin/agent-releases/build", h.build)
+	mux.HandleFunc("POST /api/admin/agent-releases/import", h.importRelease)
 	mux.HandleFunc("GET /api/admin/agent-releases", h.list)
 	mux.HandleFunc("GET /api/admin/agent-releases/{version}", h.get)
 	mux.HandleFunc("GET /api/admin/agent-releases/{version}/download/{file}", h.download)
@@ -221,15 +224,7 @@ func (h *releaseHandler) get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "找不到 release")
 		return
 	}
-	detail := agentReleaseDetail{
-		agentReleaseManifest: *manifest,
-		InstallCommand:       h.installCommand(r, version),
-		UpgradeCommand:       h.installCommand(r, version),
-	}
-	for i := range detail.Files {
-		detail.Files[i].DownloadURL = fmt.Sprintf("%s/api/admin/agent-releases/%s/download/%s", baseURL(r), version, detail.Files[i].Name)
-	}
-	writeJSON(w, http.StatusOK, detail)
+	writeJSON(w, http.StatusOK, h.releaseDetailFromManifest(r, manifest))
 }
 
 func (h *releaseHandler) download(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +237,59 @@ func (h *releaseHandler) download(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
 	http.ServeFile(w, r, fullPath)
+}
+
+func (h *releaseHandler) importRelease(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, agentReleaseImportMaxBytes)
+	if err := r.ParseMultipartForm(agentReleaseImportMaxBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 multipart form: "+err.Error())
+		return
+	}
+
+	version := strings.TrimSpace(r.FormValue("version"))
+	if version == "" || !releaseVersionPattern.MatchString(version) {
+		writeError(w, http.StatusBadRequest, "version 格式不合法")
+		return
+	}
+
+	file, _, err := r.FormFile("bundle")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "缺少 bundle 檔案")
+		return
+	}
+	defer file.Close()
+
+	logPath, logger, closeFn, err := newAgentReleaseLogger(version)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "建立 agent release log 失敗: "+err.Error())
+		return
+	}
+	defer closeFn()
+
+	logger.Printf("release import request start version=%s remote=%s user_agent=%q", version, r.RemoteAddr, r.UserAgent())
+
+	releaseFn, err := acquireAgentReleaseBuildSlot(r.Context(), logger, version)
+	if err != nil {
+		writeJSON(w, http.StatusRequestTimeout, map[string]any{
+			"error":   err.Error(),
+			"log_ref": logPath,
+		})
+		return
+	}
+	defer releaseFn()
+
+	detail, err := h.importReleaseBundle(r, version, file, logger, logPath)
+	if err != nil {
+		logger.Printf("release import request failed version=%s error=%v", version, err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   err.Error(),
+			"log_ref": logPath,
+		})
+		return
+	}
+
+	logger.Printf("release import request success version=%s log_ref=%s", version, logPath)
+	writeJSON(w, http.StatusCreated, detail)
 }
 
 func HandleAgentReleaseCapabilityDirect(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +353,62 @@ func HandleAgentReleaseDownloadDirect(w http.ResponseWriter, r *http.Request) {
 func buildReleaseLocally(ctx context.Context, rootDir, version string, r *http.Request, logger *log.Logger, logPath string) (*agentReleaseDetail, error) {
 	releaseDir := filepath.Join(rootDir, version)
 	return buildReleaseFromCapability(ctx, releaseDir, version, r, logger, logPath)
+}
+
+func (h *releaseHandler) releaseDetailFromManifest(r *http.Request, manifest *agentReleaseManifest) agentReleaseDetail {
+	detail := agentReleaseDetail{
+		agentReleaseManifest: *manifest,
+		InstallCommand:       h.installCommand(r, manifest.Version),
+		UpgradeCommand:       h.installCommand(r, manifest.Version),
+	}
+	for i := range detail.Files {
+		detail.Files[i].DownloadURL = fmt.Sprintf("%s/api/admin/agent-releases/%s/download/%s", baseURL(r), manifest.Version, detail.Files[i].Name)
+	}
+	return detail
+}
+
+func (h *releaseHandler) importReleaseBundle(r *http.Request, version string, src io.Reader, logger *log.Logger, logPath string) (*agentReleaseDetail, error) {
+	releaseDir := filepath.Join(h.rootDir, version)
+	if _, err := os.Stat(releaseDir); err == nil {
+		return nil, fmt.Errorf("release %s 已存在", version)
+	}
+
+	if err := os.MkdirAll(h.rootDir, 0755); err != nil {
+		return nil, fmt.Errorf("建立 release 根目錄失敗: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp(h.rootDir, "."+sanitizeReleaseToken(version)+"-import-")
+	if err != nil {
+		return nil, fmt.Errorf("建立暫存目錄失敗: %w", err)
+	}
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	if err := extractReleaseBundle(tempDir, version, src, logger); err != nil {
+		return nil, err
+	}
+
+	manifest, err := validateImportedRelease(tempDir, version, logPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := os.Rename(tempDir, releaseDir); err != nil {
+		return nil, fmt.Errorf("移動匯入 release 失敗: %w", err)
+	}
+	success = true
+
+	for i := range manifest.Files {
+		manifest.Files[i].DownloadURL = fmt.Sprintf("%s/api/admin/agent-releases/%s/download/%s", baseURL(r), version, manifest.Files[i].Name)
+	}
+	detail := h.releaseDetailFromManifest(r, manifest)
+	logger.Printf("release import complete version=%s files=%d", version, len(detail.Files))
+	return &detail, nil
 }
 
 func (h *releaseHandler) registerReleaseAgent(ctx context.Context, body *agentConfigPayload, r *http.Request) (*agentConfigPayload, *store.Agent, error) {
@@ -780,6 +884,147 @@ func sha256File(path string) (string, int64, error) {
 		return "", 0, err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), n, nil
+}
+
+func extractReleaseBundle(destDir, version string, src io.Reader, logger *log.Logger) error {
+	gr, err := gzip.NewReader(src)
+	if err != nil {
+		return fmt.Errorf("讀取 bundle gzip 失敗: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	prefix := version + "/"
+	extracted := 0
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("讀取 bundle tar 失敗: %w", err)
+		}
+
+		name := filepath.ToSlash(strings.TrimSpace(hdr.Name))
+		if name == "" || name == "." {
+			continue
+		}
+		if name == version || name == version+"/" {
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) {
+			return fmt.Errorf("bundle 內容必須位於 %s/ 目錄下: %s", version, name)
+		}
+
+		rel := strings.TrimPrefix(name, prefix)
+		if rel == "" {
+			continue
+		}
+		cleanRel := filepath.Clean(rel)
+		if cleanRel == "." || cleanRel == "" {
+			continue
+		}
+		if cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanRel) {
+			return fmt.Errorf("bundle 內含非法路徑: %s", hdr.Name)
+		}
+
+		targetPath := filepath.Join(destDir, cleanRel)
+		if !strings.HasPrefix(targetPath, destDir+string(filepath.Separator)) && targetPath != destDir {
+			return fmt.Errorf("bundle 路徑超出目標目錄: %s", hdr.Name)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return fmt.Errorf("建立目錄失敗 %s: %w", cleanRel, err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return fmt.Errorf("建立檔案目錄失敗 %s: %w", cleanRel, err)
+			}
+			mode := fs.FileMode(hdr.Mode)
+			if mode == 0 {
+				mode = 0644
+			}
+			f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return fmt.Errorf("建立檔案失敗 %s: %w", cleanRel, err)
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return fmt.Errorf("寫入檔案失敗 %s: %w", cleanRel, err)
+			}
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("關閉檔案失敗 %s: %w", cleanRel, err)
+			}
+			extracted++
+		default:
+			return fmt.Errorf("bundle 含不支援的 tar 類型: %s", hdr.Name)
+		}
+	}
+
+	if extracted == 0 {
+		return fmt.Errorf("bundle 內沒有可匯入檔案")
+	}
+	if logger != nil {
+		logger.Printf("release import extracted version=%s files=%d dir=%s", version, extracted, destDir)
+	}
+	return nil
+}
+
+func validateImportedRelease(releaseDir, version, logPath string) (*agentReleaseManifest, error) {
+	requiredFiles := []string{
+		"backup-agent-linux-amd64",
+		fmt.Sprintf("backup-agent_%s_linux_amd64.tar.gz", version),
+		fmt.Sprintf("backup-agent_%s_checksums.txt", version),
+		"install-agent.sh",
+		"diagnose-agent.sh",
+		"backup-agent.service",
+		"manifest.json",
+	}
+	for _, name := range requiredFiles {
+		path := filepath.Join(releaseDir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("release 缺少必要檔案: %s", name)
+			}
+			return nil, fmt.Errorf("檢查 release 檔案失敗 %s: %w", name, err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("release 檔案不可為目錄: %s", name)
+		}
+	}
+
+	raw, err := os.ReadFile(filepath.Join(releaseDir, "manifest.json"))
+	if err != nil {
+		return nil, fmt.Errorf("讀取 manifest 失敗: %w", err)
+	}
+	var manifest agentReleaseManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return nil, fmt.Errorf("manifest 格式錯誤: %w", err)
+	}
+	if manifest.Version != version {
+		return nil, fmt.Errorf("manifest version 不符: expected %s got %s", version, manifest.Version)
+	}
+
+	requiredByManifest := map[string]struct{}{}
+	for _, file := range manifest.Files {
+		requiredByManifest[file.Name] = struct{}{}
+	}
+	for _, name := range requiredFiles[:len(requiredFiles)-1] {
+		if _, ok := requiredByManifest[name]; !ok {
+			return nil, fmt.Errorf("manifest 缺少檔案項目: %s", name)
+		}
+	}
+
+	if logPath != "" && strings.TrimSpace(manifest.LogRef) == "" {
+		manifest.LogRef = logPath
+		if err := writeJSONFile(filepath.Join(releaseDir, "manifest.json"), manifest); err != nil {
+			return nil, fmt.Errorf("回寫 manifest log_ref 失敗: %w", err)
+		}
+	}
+	return &manifest, nil
 }
 
 func writeJSONFile(path string, v any) error {

@@ -253,6 +253,23 @@ async function api(method, path, body) {
   }
   return data;
 }
+
+async function apiFormPost(path, formData) {
+  const r = await fetch(path, { method: 'POST', body: formData });
+  if (r.status === 204) return null;
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch {
+    throw new Error(`伺服器回應非 JSON（HTTP ${r.status}）`);
+  }
+  if (!r.ok) {
+    const err = new Error(data.error || `HTTP ${r.status}`);
+    err.data = data;
+    err.status = r.status;
+    throw err;
+  }
+  return data;
+}
 const apiGet    = p      => api('GET',    p);
 const apiPost   = (p, b) => api('POST',   p, b);
 const apiPut    = (p, b) => api('PUT',    p, b);
@@ -3965,6 +3982,23 @@ function renderAdmin() {
           <button id="agent-release-build-btn" class="btn btn-primary" onclick="buildAgentRelease()">建立新版本</button>
         </div>
       </div>
+      <div style="padding:14px 16px;border:1px dashed var(--border);border-radius:var(--radius);background:var(--surface2);margin-bottom:14px">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:12px">若你已在本地產生完整 release bundle，可直接上傳匯入，不走 dashboard / agent 建版。</div>
+        <div class="form-row">
+          <div class="form-group" style="margin:0">
+            <label class="form-label">手動上傳版本號</label>
+            <input id="agent-release-import-version" class="form-input" placeholder="需與 bundle 內版本一致，例如：1.0.0-manual">
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Release Bundle</label>
+            <input id="agent-release-import-bundle" type="file" class="form-input" accept=".tar.gz,application/gzip,application/x-gzip">
+          </div>
+          <div class="form-group" style="margin:0;display:flex;align-items:flex-end">
+            <button id="agent-release-import-btn" class="btn btn-secondary" onclick="importAgentRelease()">上傳版本</button>
+          </div>
+        </div>
+        <div class="form-hint" style="margin-top:10px">請上傳由 <span class="mono">scripts/upload-agent-release.sh</span> 或同規格流程產生的 bundle。</div>
+      </div>
       <div style="padding:14px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2);margin-bottom:14px">
         <label class="form-check" style="margin-bottom:12px"><input id="agent-release-register-toggle" type="checkbox"> 建版完成後同步建立或更新 Agent 管理資料</label>
         <div class="form-row">
@@ -4598,6 +4632,55 @@ async function buildAgentRelease() {
     if (btn) {
       btn.disabled = false;
       btn.textContent = '建立新版本';
+    }
+  }
+}
+
+async function importAgentRelease() {
+  const btn = document.getElementById('agent-release-import-btn');
+  const version = document.getElementById('agent-release-import-version')?.value.trim();
+  const fileInput = document.getElementById('agent-release-import-bundle');
+  const bundle = fileInput?.files?.[0];
+  if (!version) { toast('請填寫手動上傳版本號', 'warning'); return; }
+  if (!bundle) { toast('請選擇 release bundle', 'warning'); return; }
+
+  const form = new FormData();
+  form.append('version', version);
+  form.append('bundle', bundle);
+
+  try {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '上傳中...';
+    }
+    toast('開始上傳 agent release bundle，請稍候...', 'info');
+    const rel = await apiFormPost('/api/admin/agent-releases/import', form);
+    toast(`已匯入版本 ${rel.version}`, 'success');
+    if (fileInput) fileInput.value = '';
+    loadAgentReleases();
+    showAgentReleaseDetail(rel.version);
+  } catch(e) {
+    if (e?.data?.log_ref) {
+      openModal('Agent Release 匯入失敗', `
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div style="padding:12px 14px;border:1px solid var(--danger-border);border-radius:var(--radius);background:var(--danger-bg);color:var(--danger)">
+            ${esc(e.message)}
+          </div>
+          <div>
+            <div class="form-label">實體 Log 路徑</div>
+            <div style="display:flex;gap:8px">
+              <input id="agent-release-import-log-ref" class="form-input mono" value="${esc(e.data.log_ref)}">
+              <button class="btn btn-secondary" onclick="copyText('agent-release-import-log-ref')">複製</button>
+            </div>
+          </div>
+        </div>
+      `, `<button class="btn btn-primary" onclick="closeModal()">關閉</button>`, true);
+    }
+    toast(e.message, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '上傳版本';
     }
   }
 }
