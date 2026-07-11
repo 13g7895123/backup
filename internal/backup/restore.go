@@ -2,6 +2,8 @@ package backup
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -124,13 +126,54 @@ func RestoreDatabase(archivePath string, cfg *DatabaseConfig, opts RestoreOption
 
 	switch {
 	case restoreCfg.ContainerName != "":
-		return restoreDatabaseViaDocker(gz, &restoreCfg, password)
+		return restoreDatabaseViaDocker(postgresCompatibleRestoreReader(gz, restoreCfg.DBType), &restoreCfg, password)
 	case restoreCfg.DBType == "postgres":
-		return restorePostgres(gz, &restoreCfg, password)
+		return restorePostgres(postgresCompatibleRestoreReader(gz, restoreCfg.DBType), &restoreCfg, password)
 	case restoreCfg.DBType == "mysql":
 		return restoreMySQL(gz, &restoreCfg, password)
 	default:
 		return fmt.Errorf("不支援的資料庫類型: %s", restoreCfg.DBType)
+	}
+}
+
+// postgresCompatibleRestoreReader removes session settings emitted by newer
+// pg_dump versions that older supported PostgreSQL servers do not recognize.
+// It deliberately leaves all schema and data statements untouched.
+func postgresCompatibleRestoreReader(r io.Reader, dbType string) io.Reader {
+	if dbType != "postgres" {
+		return r
+	}
+	return &postgresRestoreCompatibilityReader{source: bufio.NewReader(r)}
+}
+
+type postgresRestoreCompatibilityReader struct {
+	source  *bufio.Reader
+	pending bytes.Reader
+	done    bool
+}
+
+func (r *postgresRestoreCompatibilityReader) Read(p []byte) (int, error) {
+	for {
+		if r.pending.Len() > 0 {
+			return r.pending.Read(p)
+		}
+		if r.done {
+			return 0, io.EOF
+		}
+		line, err := r.source.ReadString('\n')
+		if err != nil {
+			if err != io.EOF {
+				return 0, err
+			}
+			r.done = true
+		}
+		if strings.TrimSpace(line) == "SET transaction_timeout = 0;" {
+			continue
+		}
+		if line == "" {
+			return 0, io.EOF
+		}
+		r.pending.Reset([]byte(line))
 	}
 }
 
