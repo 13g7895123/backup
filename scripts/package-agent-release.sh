@@ -97,9 +97,11 @@ verify_linux_amd64_binary() {
 ROOT_BINARY="${ROOT}/backup-agent"
 RELEASE_DIR="${RELEASES_DIR}/${VERSION}"
 TAR_NAME="backup-agent_${VERSION}_linux_amd64.tar.gz"
+PACKAGE_DIR="backup-agent_${VERSION}_linux_amd64"
 CHECKSUM_NAME="backup-agent_${VERSION}_checksums.txt"
 CHECKSUM_PATH="${RELEASE_DIR}/${CHECKSUM_NAME}"
 MANIFEST_PATH="${RELEASE_DIR}/manifest.json"
+PACKAGE_WORK_DIR=""
 
 mkdir -p "${RELEASES_DIR}"
 if [[ -e "${RELEASE_DIR}" ]]; then
@@ -108,6 +110,9 @@ if [[ -e "${RELEASE_DIR}" ]]; then
 fi
 
 cleanup() {
+  if [[ -n "${PACKAGE_WORK_DIR}" && -d "${PACKAGE_WORK_DIR}" ]]; then
+    rm -rf "${PACKAGE_WORK_DIR}"
+  fi
   if [[ -d "${RELEASE_DIR}" ]]; then
     rm -rf "${RELEASE_DIR}"
   fi
@@ -135,11 +140,15 @@ cp "${ROOT}/scripts/backup-agent.service" "${RELEASE_DIR}/backup-agent.service"
 chmod 0755 "${RELEASE_DIR}/install-agent.sh" "${RELEASE_DIR}/diagnose-agent.sh"
 chmod 0644 "${RELEASE_DIR}/backup-agent.service"
 
-tar -C "${RELEASE_DIR}" -czf "${RELEASE_DIR}/${TAR_NAME}" \
-  backup-agent-linux-amd64 \
-  install-agent.sh \
-  diagnose-agent.sh \
-  backup-agent.service
+PACKAGE_WORK_DIR="$(mktemp -d)"
+mkdir -p "${PACKAGE_WORK_DIR}/${PACKAGE_DIR}"
+cp "${RELEASE_DIR}/backup-agent-linux-amd64" "${PACKAGE_WORK_DIR}/${PACKAGE_DIR}/backup-agent-linux-amd64"
+cp "${RELEASE_DIR}/install-agent.sh" "${PACKAGE_WORK_DIR}/${PACKAGE_DIR}/install-agent.sh"
+cp "${RELEASE_DIR}/diagnose-agent.sh" "${PACKAGE_WORK_DIR}/${PACKAGE_DIR}/diagnose-agent.sh"
+cp "${RELEASE_DIR}/backup-agent.service" "${PACKAGE_WORK_DIR}/${PACKAGE_DIR}/backup-agent.service"
+tar -C "${PACKAGE_WORK_DIR}" -czf "${RELEASE_DIR}/${TAR_NAME}" "${PACKAGE_DIR}"
+rm -rf "${PACKAGE_WORK_DIR}"
+PACKAGE_WORK_DIR=""
 
 COMMIT=""
 if command -v git >/dev/null 2>&1; then
