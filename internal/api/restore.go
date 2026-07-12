@@ -234,14 +234,24 @@ func (h *restoreHandler) restoreLocal(ctx context.Context, rec *store.BackupReco
 			return nil, err
 		}
 		applyProjectDatabaseDefaults(project, cfg)
+		restoreCfg := *cfg
+		if restoreTarget != "" {
+			restoreCfg.Name = restoreTarget
+		}
 		if req.Strategy == "overwrite" {
-			path, err := backup.SnapshotDatabase(cfg, snapshotDir, project.Name)
+			path, err := backup.SnapshotDatabase(&restoreCfg, snapshotDir, project.Name)
 			if err != nil {
 				return nil, fmt.Errorf("overwrite 前 DB snapshot 失敗: %w", err)
 			}
 			snapshotPath = path
 		}
-		if err := backup.RestoreDatabase(rec.Path, cfg, backup.RestoreOptions{Strategy: req.Strategy, Target: restoreTarget}); err != nil {
+		if req.Strategy == "overwrite" && restoreCfg.DBType == "postgres" {
+			// 仿 apply-backup:先重建目標資料庫再灌入 dump,
+			// 避免 plain dump 撞到既有資料表;失敗時以 snapshot 回復。
+			if _, _, err := backup.ReplacePostgresDatabase(rec.Path, &restoreCfg, snapshotPath); err != nil {
+				return nil, err
+			}
+		} else if err := backup.RestoreDatabase(rec.Path, cfg, backup.RestoreOptions{Strategy: req.Strategy, Target: restoreTarget}); err != nil {
 			return nil, err
 		}
 	default:

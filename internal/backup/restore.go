@@ -177,6 +177,52 @@ func (r *postgresRestoreCompatibilityReader) Read(p []byte) (int, error) {
 	}
 }
 
+// ReplacePostgresDatabase 以「重建資料庫」方式覆蓋還原 PostgreSQL:
+// 驗證備份檔 → 建立 dump 需要的 role → drop + create 目標資料庫(cfg.Name)→ 灌入 dump。
+// 灌入失敗時以 snapshotPath 重建並回復目標資料庫。
+func ReplacePostgresDatabase(archivePath string, cfg *DatabaseConfig, snapshotPath string) (requiredRoles, createdRoles []string, err error) {
+	if cfg == nil || cfg.DBType != "postgres" {
+		return nil, nil, fmt.Errorf("重建式覆蓋還原僅支援 PostgreSQL")
+	}
+	if strings.TrimSpace(cfg.Name) == "" {
+		return nil, nil, fmt.Errorf("database name required")
+	}
+	if strings.TrimSpace(snapshotPath) == "" {
+		return nil, nil, fmt.Errorf("覆蓋還原需要先建立 snapshot")
+	}
+	if err := ValidateSQLGzip(archivePath); err != nil {
+		return nil, nil, fmt.Errorf("備份檔無法讀取或不是有效的 .sql.gz: %w", err)
+	}
+	requiredRoles, createdRoles, err = EnsurePostgresDumpRoles(cfg, archivePath)
+	if err != nil {
+		return requiredRoles, createdRoles, fmt.Errorf("建立備份所需 PostgreSQL role 失敗: %w", err)
+	}
+	if err := recreatePostgresDatabase(cfg); err != nil {
+		return requiredRoles, createdRoles, fmt.Errorf("重建目標資料庫失敗: %w", err)
+	}
+	if err := RestoreDatabase(archivePath, cfg, RestoreOptions{Strategy: "overwrite", Target: cfg.Name}); err != nil {
+		if rbErr := rollbackPostgresDatabase(cfg, snapshotPath); rbErr != nil {
+			return requiredRoles, createdRoles, fmt.Errorf("覆蓋還原失敗: %w; snapshot 回復也失敗: %v", err, rbErr)
+		}
+		return requiredRoles, createdRoles, fmt.Errorf("覆蓋還原失敗: %w; 已使用 snapshot 回復目標資料庫", err)
+	}
+	return requiredRoles, createdRoles, nil
+}
+
+func recreatePostgresDatabase(cfg *DatabaseConfig) error {
+	if err := DeletePostgresDatabase(cfg, cfg.Name); err != nil {
+		return err
+	}
+	return CreateDatabase(cfg)
+}
+
+func rollbackPostgresDatabase(cfg *DatabaseConfig, snapshotPath string) error {
+	if err := recreatePostgresDatabase(cfg); err != nil {
+		return err
+	}
+	return RestoreDatabase(snapshotPath, cfg, RestoreOptions{Strategy: "overwrite", Target: cfg.Name})
+}
+
 func SnapshotFiles(source, snapshotDir, label string) (string, error) {
 	if strings.TrimSpace(source) == "" {
 		return "", fmt.Errorf("snapshot source required")

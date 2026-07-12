@@ -392,14 +392,24 @@ func runRestore(ctx context.Context, c *client.DashboardClient, recordID int64, 
 				}
 			}
 		}
+		restoreCfg := *cfg
+		if restoreTarget != "" {
+			restoreCfg.Name = restoreTarget
+		}
 		if strategy == "overwrite" {
-			path, err := backup.SnapshotDatabase(cfg, snapshotDir, rec.ProjectName)
+			path, err := backup.SnapshotDatabase(&restoreCfg, snapshotDir, rec.ProjectName)
 			if err != nil {
 				return nil, fmt.Errorf("overwrite 前 DB snapshot 失敗: %w", err)
 			}
 			snapshotPath = path
 		}
-		if err := backup.RestoreDatabase(tmpPath, cfg, backup.RestoreOptions{Strategy: strategy, Target: restoreTarget}); err != nil {
+		if strategy == "overwrite" && restoreCfg.DBType == "postgres" {
+			// 仿 dashboard apply-backup:先重建目標資料庫再灌入 dump,
+			// 避免 plain dump 撞到既有資料表;失敗時以 snapshot 回復。
+			if _, _, err := backup.ReplacePostgresDatabase(tmpPath, &restoreCfg, snapshotPath); err != nil {
+				return nil, err
+			}
+		} else if err := backup.RestoreDatabase(tmpPath, cfg, backup.RestoreOptions{Strategy: strategy, Target: restoreTarget}); err != nil {
 			return nil, err
 		}
 	default:
