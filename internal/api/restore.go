@@ -43,7 +43,7 @@ func (h *restoreHandler) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Strategy == "" {
-		req.Strategy = "new"
+		req.Strategy = "overwrite"
 	}
 	if req.Strategy != "new" && req.Strategy != "overwrite" {
 		writeError(w, http.StatusBadRequest, "strategy 必須為 new 或 overwrite")

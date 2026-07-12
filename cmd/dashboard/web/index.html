@@ -122,17 +122,25 @@ textarea.form-input{resize:vertical;min-height:72px}
 .admin-tabs .tab.active{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 4px 10px rgba(37,99,235,.18)}
 .admin-tabs .tab:focus-visible{outline:3px solid rgba(37,99,235,.25);outline-offset:2px}
 .admin-tab-panel[hidden]{display:none!important}
+.admin-page-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.admin-page-title .admin-tabs{position:static;top:auto;z-index:auto;gap:8px;background:transparent;padding:0;margin:0;overflow:visible}
+.admin-page-title .admin-tabs .tab{min-height:36px;padding:6px 12px}
 .diff-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}
 .diff-stat{padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}
 .diff-stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}.diff-stat span{font-size:12px;color:var(--text2)}
 .sql-preview{max-height:220px;overflow:auto;padding:12px;background:#172033;color:#e2e8f0;border-radius:6px;font:12px/1.55 monospace;white-space:pre-wrap;word-break:break-word}
-@media(max-width:640px){.diff-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:12px}.admin-tabs .tab{flex:0 0 auto}}
+@media(max-width:640px){.diff-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:12px}.admin-tabs .tab{flex:0 0 auto}.admin-page-title{align-items:flex-start}.admin-page-title .admin-tabs{width:100%;padding-bottom:4px}}
 /* Page header */
 .page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap;gap:10px}
 .page-hdr-left h1{font-size:22px;font-weight:700}.page-hdr-left p{font-size:14px;color:var(--text2);margin-top:3px}
 .page-hdr-right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 /* Filter bar */
 .filter-bar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
+.inline-filters{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px}
+.inline-filter{display:flex;flex-direction:column;gap:5px;min-width:150px;flex:1 1 150px}
+.inline-filter.compact{flex:0 0 auto;min-width:0}
+.list-pager{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
+.list-pager-meta{font-size:13px;color:var(--text2)}
 select.form-input{width:auto}
 /* Loading / Empty */
 .loading{text-align:center;padding:48px 24px;color:var(--text3)}
@@ -328,6 +336,35 @@ function fmtDur(s) {
   return Math.floor(s/60) + 'm ' + (s % 60).toFixed(0) + 's';
 }
 
+function paginateClient(items, page, pageSize) {
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const current = Math.min(Math.max(page, 1), pages);
+  const start = (current - 1) * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    total,
+    page: current,
+    pages,
+    start: total === 0 ? 0 : start + 1,
+    end: Math.min(start + pageSize, total),
+  };
+}
+
+function renderPager(key, page, pages, total, reloadFnName) {
+  if (total <= 0) return '';
+  const start = (page - 1) * getAdminPagerState(key).pageSize + 1;
+  const end = Math.min(page * getAdminPagerState(key).pageSize, total);
+  return `
+    <div class="list-pager">
+      <div class="list-pager-meta">顯示 ${start}-${end} / 共 ${total} 筆，第 ${page} / ${pages} 頁</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm btn-secondary" onclick="setAdminListPage('${key}', ${page - 1}, '${reloadFnName}')" ${page <= 1 ? 'disabled' : ''}>← 上一頁</button>
+        <button class="btn btn-sm btn-secondary" onclick="setAdminListPage('${key}', ${page + 1}, '${reloadFnName}')" ${page >= pages ? 'disabled' : ''}>下一頁 →</button>
+      </div>
+    </div>`;
+}
+
 // 從 cron 表達式判斷備份頻率
 function cronFrequency(expr) {
   if (!expr) return null;
@@ -476,6 +513,27 @@ let currentTab = 'targets';
 let currentOnlineSecTab = 'calendar';
 let _onlineSecHistoryFilter = '';
 let isAdmin = false;
+const _adminPagerState = {};
+
+function getAdminPagerState(key, pageSize = 10) {
+  if (!_adminPagerState[key]) _adminPagerState[key] = { page: 1, pageSize };
+  if (!_adminPagerState[key].pageSize) _adminPagerState[key].pageSize = pageSize;
+  return _adminPagerState[key];
+}
+
+function resetAdminListPage(key) {
+  getAdminPagerState(key).page = 1;
+}
+
+function setAdminListPage(key, page, reloadFnName) {
+  const state = getAdminPagerState(key);
+  state.page = Math.max(1, page);
+  if (reloadFnName && typeof window[reloadFnName] === 'function') {
+    window[reloadFnName]();
+    return;
+  }
+  renderPage();
+}
 
 function navigate(page, projectId = null) {
   currentPage = page;
@@ -2306,7 +2364,7 @@ function showRestoreRecord(id) {
       <label class="form-label">還原策略</label>
       <select id="f-restore-strategy" class="form-input" onchange="toggleRestoreConfirm()">
         <option value="new">new：還原到新位置 / 新資料庫</option>
-        <option value="overwrite">overwrite：覆蓋原位置 / 原資料庫</option>
+        <option value="overwrite" selected>overwrite：覆蓋原位置 / 原資料庫</option>
       </select>
     </div>
     <div class="form-group">
@@ -2324,6 +2382,7 @@ function showRestoreRecord(id) {
     <button class="btn btn-secondary" onclick="closeModal()">取消</button>
     <button class="btn btn-danger" onclick="submitRestoreRecord(${id})">開始還原</button>
   `, true);
+  toggleRestoreConfirm();
   if (rec.type === 'database') loadRestorePreview(id);
 }
 
@@ -2340,7 +2399,7 @@ async function loadRestorePreview(id) {
 }
 
 function toggleRestoreConfirm() {
-  const strategy = document.getElementById('f-restore-strategy')?.value || 'new';
+  const strategy = document.getElementById('f-restore-strategy')?.value || 'overwrite';
   const wrap = document.getElementById('restore-confirm-wrap');
   if (wrap) wrap.style.display = strategy === 'overwrite' ? 'block' : 'none';
 }
@@ -4000,18 +4059,20 @@ function renderAdmin() {
   setContent(`
     <div class="page-hdr">
       <div class="page-hdr-left">
-        <h1>系統管理</h1>
+        <div class="admin-page-title">
+          <h1>系統管理</h1>
+          <div id="admin-tabs" class="tabs admin-tabs" role="tablist" aria-label="系統管理功能"></div>
+        </div>
         <p>管理與維護功能</p>
       </div>
     </div>
-    <div id="admin-tabs" class="tabs admin-tabs" role="tablist" aria-label="系統管理功能"></div>
     <div class="card sg" data-admin-tab="PostgreSQL">
       <div class="card-title">PostgreSQL 管理</div>
       <div style="font-size:13px;color:var(--text2);margin-bottom:14px">建立或刪除專案資料庫、匯入受控資料，以及比較兩份 PostgreSQL 備份。</div>
       <div class="form-row" style="margin-bottom:14px">
         <div class="form-group" style="margin:0">
           <label class="form-label" for="pg-project-sel">PostgreSQL 專案</label>
-          <select id="pg-project-sel" class="form-input" onchange="loadPostgresAdmin()"><option value="">— 請選擇 —</option></select>
+          <select id="pg-project-sel" class="form-input" onchange="resetAdminListPage('postgresDatabases');resetAdminListPage('postgresLogs');loadPostgresAdmin()"><option value="">— 請選擇 —</option></select>
         </div>
         <div class="form-group" style="margin:0;display:flex;align-items:flex-end">
           <button class="btn btn-secondary" onclick="loadPostgresAdmin()">重新整理</button>
@@ -4027,18 +4088,17 @@ function renderAdmin() {
     <div class="card sg">
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
         <span>Agent Command Logs</span>
-        <button class="btn btn-sm btn-secondary" onclick="loadAgentCommands()" id="agent-command-refresh-btn">↺ 重新整理</button>
       </div>
-      <div class="form-row" style="margin-bottom:14px">
-        <div class="form-group" style="margin:0">
+      <div class="inline-filters">
+        <div class="inline-filter">
           <label class="form-label">Agent</label>
-          <select id="agent-command-agent-filter" class="form-input" onchange="loadAgentCommands()">
+          <select id="agent-command-agent-filter" class="form-input" onchange="resetAdminListPage('agentCommands');loadAgentCommands()">
             <option value="">全部</option>
           </select>
         </div>
-        <div class="form-group" style="margin:0">
+        <div class="inline-filter">
           <label class="form-label">狀態</label>
-          <select id="agent-command-status-filter" class="form-input" onchange="loadAgentCommands()">
+          <select id="agent-command-status-filter" class="form-input" onchange="resetAdminListPage('agentCommands');loadAgentCommands()">
             <option value="">全部</option>
             <option value="pending">pending</option>
             <option value="running">running</option>
@@ -4046,15 +4106,18 @@ function renderAdmin() {
             <option value="failed">failed</option>
           </select>
         </div>
-        <div class="form-group" style="margin:0">
+        <div class="inline-filter">
           <label class="form-label">類型</label>
-          <select id="agent-command-type-filter" class="form-input" onchange="loadAgentCommands()">
+          <select id="agent-command-type-filter" class="form-input" onchange="resetAdminListPage('agentCommands');loadAgentCommands()">
             <option value="">全部</option>
             <option value="trigger_backup">trigger_backup</option>
             <option value="restore_backup">restore_backup</option>
             <option value="reload_schedule">reload_schedule</option>
             <option value="remove_schedule">remove_schedule</option>
           </select>
+        </div>
+        <div class="inline-filter compact">
+          <button class="btn btn-sm btn-secondary" onclick="loadAgentCommands()" id="agent-command-refresh-btn">↺ 重新整理</button>
         </div>
       </div>
       <div id="agent-command-panel"><div class="loading"><div class="spinner"></div>載入中...</div></div>
@@ -4172,7 +4235,7 @@ function renderAdmin() {
       <div class="form-row" style="margin-bottom:14px">
         <div class="form-group" style="margin:0">
           <label class="form-label">選擇專案</label>
-          <select id="ak-project-sel" class="form-input" onchange="loadAdminAPIKeys(this.value)">
+          <select id="ak-project-sel" class="form-input" onchange="resetAdminListPage('projectApiKeys');loadAdminAPIKeys(this.value)">
             <option value="">— 請選擇 —</option>
           </select>
         </div>
@@ -4203,7 +4266,7 @@ function renderAdmin() {
       <div class="form-row" style="margin-bottom:14px">
         <div class="form-group" style="margin:0">
           <label class="form-label">選擇系統日誌</label>
-          <select id="sk-syslog-sel" class="form-input" onchange="loadAdminSyslogKeys(this.value)">
+          <select id="sk-syslog-sel" class="form-input" onchange="resetAdminListPage('syslogApiKeys');loadAdminSyslogKeys(this.value)">
             <option value="">— 請選擇 —</option>
           </select>
         </div>
@@ -4353,14 +4416,18 @@ async function loadPostgresAdmin() {
       apiGet(`/api/projects/${projectId}/postgres/diagnose`).catch(error=>({error:error.message})),
     ]);
     const names = dbData.databases || [], records = backups.records || [];
+    const dbPager = getAdminPagerState('postgresDatabases', 8);
+    const pagedNames = paginateClient(names, dbPager.page, dbPager.pageSize);
+    dbPager.page = pagedNames.page;
     const backupOptions = records.map(r=>`<option value="${r.id}">${esc(r.filename)} · ${fmtDate(r.created_at)}</option>`).join('');
     panel.innerHTML=`
       ${dbData.error?`<div style="padding:12px 14px;margin-bottom:14px;border:1px solid var(--danger-border);border-radius:var(--radius);background:var(--danger-bg);color:var(--danger);font-size:13px" role="alert">資料庫清單讀取失敗：${esc(dbData.error)}。NAS 備份選單仍可使用。</div>`:''}
       ${backups.error?`<div style="padding:12px 14px;margin-bottom:14px;border:1px solid var(--danger-border);border-radius:var(--radius);background:var(--danger-bg);color:var(--danger);font-size:13px" role="alert">NAS 備份紀錄讀取失敗：${esc(backups.error)}</div>`:''}
       <div class="tabs" role="tablist" aria-label="PostgreSQL 操作"><button class="tab active" type="button">資料庫與資料</button><button class="tab" type="button" onclick="document.getElementById('pg-compare').scrollIntoView({behavior:'smooth'})">備份差異</button></div>
       <div class="table-wrap"><table><thead><tr><th>資料庫</th><th>狀態</th><th style="text-align:right">操作</th></tr></thead><tbody>
-        ${names.map(n=>`<tr><td class="mono"><strong>${esc(n)}</strong></td><td><span class="badge">測試資料庫</span></td><td class="td-actions"><button class="btn btn-xs btn-danger" onclick="deletePostgresDatabase('${esc(n)}')">刪除</button></td></tr>`).join('') || '<tr><td colspan="3">尚未建立測試資料庫</td></tr>'}
+        ${pagedNames.items.map(n=>`<tr><td class="mono"><strong>${esc(n)}</strong></td><td><span class="badge">測試資料庫</span></td><td class="td-actions"><button class="btn btn-xs btn-danger" onclick="deletePostgresDatabase('${esc(n)}')">刪除</button></td></tr>`).join('') || '<tr><td colspan="3">尚未建立測試資料庫</td></tr>'}
       </tbody></table></div>
+      ${renderPager('postgresDatabases', pagedNames.page, pagedNames.pages, pagedNames.total, 'loadPostgresAdmin')}
       <div class="form-row" style="margin-top:16px"><div class="form-group"><label class="form-label" for="pg-new-name">建立資料庫</label><input id="pg-new-name" class="form-input mono" placeholder="例如 app_staging"><div class="form-hint">只允許英文字母、數字與底線。</div></div><div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="createPostgresDatabase()">建立資料庫</button></div></div>
       <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
       <div class="card-title">插入資料</div><div class="form-row"><div class="form-group"><label class="form-label" for="pg-data-db">目標資料庫</label><select id="pg-data-db" class="form-input">${names.map(n=>`<option>${esc(n)}</option>`).join('')}</select></div></div>
@@ -4379,7 +4446,7 @@ async function loadPostgresAdmin() {
       <pre class="mono" style="white-space:pre-wrap;max-height:260px;overflow:auto;padding:12px;background:var(--surface2);border-radius:var(--radius)">${esc(JSON.stringify(diagnose,null,2))}</pre>
       <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
       <div class="card-title" style="display:flex;align-items:center;justify-content:space-between"><span>PostgreSQL 操作 Log</span><button class="btn btn-sm btn-secondary" onclick="loadPostgresLogs()">↺ 重新整理</button></div>
-      <div class="form-row" style="margin-bottom:12px"><div class="form-group"><label class="form-label">結果</label><select id="pg-log-status" class="form-input" onchange="loadPostgresLogs()"><option value="">全部</option><option value="failed">失敗</option><option value="success">成功</option></select></div><div class="form-group"><label class="form-label">顯示筆數</label><select id="pg-log-limit" class="form-input" onchange="loadPostgresLogs()"><option>50</option><option>100</option><option>200</option></select></div></div>
+      <div class="form-row" style="margin-bottom:12px"><div class="form-group"><label class="form-label">結果</label><select id="pg-log-status" class="form-input" onchange="resetAdminListPage('postgresLogs');loadPostgresLogs()"><option value="">全部</option><option value="failed">失敗</option><option value="success">成功</option></select></div><div class="form-group"><label class="form-label">顯示筆數</label><select id="pg-log-limit" class="form-input" onchange="resetAdminListPage('postgresLogs');loadPostgresLogs()"><option>50</option><option>100</option><option>200</option></select></div></div>
       <div class="form-hint" style="margin-bottom:10px">記錄最近 500 次操作；服務重啟後清空。內容最多保留 64 KiB，API 不驗證身分。</div>
       <div id="pg-operation-logs"><div class="loading"><div class="spinner"></div>載入 Log...</div></div>`;
     loadPostgresLogs();
@@ -4403,7 +4470,10 @@ async function loadPostgresLogs(){
   el.innerHTML='<div class="loading"><div class="spinner"></div>載入 Log...</div>';
   try{
     const data=await apiGet(`/api/projects/${projectId}/postgres/logs?limit=${encodeURIComponent(limit)}&status=${encodeURIComponent(status)}`),logs=data.logs||[];
-    el.innerHTML=logs.length?`<div class="table-wrap"><table><thead><tr><th>時間 / 操作</th><th>結果</th><th>耗時</th><th>內容</th></tr></thead><tbody>${logs.map(x=>`<tr><td><div>${fmtDate(x.created_at)}</div><div class="mono">#${x.id} ${esc(x.operation)}</div><div class="mono" style="font-size:11px">${esc(x.method)} ${esc(x.path)}</div></td><td><span class="badge ${x.success?'badge-success':'badge-danger'}">HTTP ${x.status}</span></td><td>${x.duration_ms} ms</td><td><details><summary style="cursor:pointer">Request / Response${x.truncated?'（已截斷）':''}</summary><div class="form-hint">來源：${esc(x.remote_addr||'—')}</div><div style="font-weight:600;margin-top:8px">Request</div><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto">${esc(x.request_body||'—')}</pre><div style="font-weight:600">Response</div><pre class="mono" style="white-space:pre-wrap;max-height:320px;overflow:auto">${esc(x.response_body||'—')}</pre></details></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">尚無 PostgreSQL 操作 Log</div>';
+    const pager = getAdminPagerState('postgresLogs', 10);
+    const paged = paginateClient(logs, pager.page, pager.pageSize);
+    pager.page = paged.page;
+    el.innerHTML=logs.length?`<div class="table-wrap"><table><thead><tr><th>時間 / 操作</th><th>結果</th><th>耗時</th><th>內容</th></tr></thead><tbody>${paged.items.map(x=>`<tr><td><div>${fmtDate(x.created_at)}</div><div class="mono">#${x.id} ${esc(x.operation)}</div><div class="mono" style="font-size:11px">${esc(x.method)} ${esc(x.path)}</div></td><td><span class="badge ${x.success?'badge-success':'badge-danger'}">HTTP ${x.status}</span></td><td>${x.duration_ms} ms</td><td><details><summary style="cursor:pointer">Request / Response${x.truncated?'（已截斷）':''}</summary><div class="form-hint">來源：${esc(x.remote_addr||'—')}</div><div style="font-weight:600;margin-top:8px">Request</div><pre class="mono" style="white-space:pre-wrap;max-height:240px;overflow:auto">${esc(x.request_body||'—')}</pre><div style="font-weight:600">Response</div><pre class="mono" style="white-space:pre-wrap;max-height:320px;overflow:auto">${esc(x.response_body||'—')}</pre></details></td></tr>`).join('')}</tbody></table></div>${renderPager('postgresLogs', paged.page, paged.pages, paged.total, 'loadPostgresLogs')}`:'<div class="empty">尚無 PostgreSQL 操作 Log</div>';
   }catch(e){el.innerHTML=`<div class="empty">Log 讀取失敗：${esc(e.message)}</div>`}
 }
 
@@ -4419,11 +4489,14 @@ async function loadAdminAgents() {
       el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">🤖</div>尚未建立任何 Agent</div>';
       return;
     }
+    const pager = getAdminPagerState('adminAgents', 10);
+    const paged = paginateClient(agents, pager.page, pager.pageSize);
+    pager.page = paged.page;
     el.innerHTML = `
       <div class="table-wrap">
         <table>
           <thead><tr><th>名稱</th><th>Code</th><th>狀態</th><th>目前版本</th><th>最新 Release</th><th>更新狀態</th><th>Base URL</th><th>最後心跳</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${agents.map(a => `<tr>
+          <tbody>${paged.items.map(a => `<tr>
             <td><strong>${esc(a.name)}</strong></td>
             <td><span class="mono">${esc(a.code)}</span></td>
             <td>${agentStatusBadge(a)}</td>
@@ -4439,7 +4512,8 @@ async function loadAdminAgents() {
             </td>
           </tr>`).join('')}</tbody>
         </table>
-      </div>`;
+      </div>
+      ${renderPager('adminAgents', paged.page, paged.pages, paged.total, 'loadAdminAgents')}`;
     const sel = document.getElementById('agent-command-agent-filter');
     if (sel) {
       const current = sel.value;
@@ -4470,12 +4544,21 @@ async function loadAgentCommands() {
     const agentId = document.getElementById('agent-command-agent-filter')?.value || '';
     const status = document.getElementById('agent-command-status-filter')?.value || '';
     const type = document.getElementById('agent-command-type-filter')?.value || '';
-    const qs = new URLSearchParams({ limit: '50' });
+    const pager = getAdminPagerState('agentCommands', 20);
+    const qs = new URLSearchParams({ limit: String(pager.pageSize), offset: String((pager.page - 1) * pager.pageSize) });
     if (agentId) qs.set('agent_id', agentId);
     if (status) qs.set('status', status);
     if (type) qs.set('type', type);
     const res = await apiGet(`/api/admin/agent-commands?${qs.toString()}`);
     const commands = res.commands || [];
+    const total = Number(res.total || 0);
+    const pages = Math.max(1, Math.ceil(total / pager.pageSize));
+    if (total > 0 && commands.length === 0 && pager.page > 1) {
+      pager.page = pages;
+      loadAgentCommands();
+      return;
+    }
+    pager.page = Math.min(pager.page, pages);
     if (commands.length === 0) {
       el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">🧾</div>尚無 agent command</div>';
       return;
@@ -4495,7 +4578,8 @@ async function loadAgentCommands() {
             <td class="td-actions"><button class="btn btn-xs btn-secondary" onclick="showAgentCommandDetail(${cmd.id})">詳情</button></td>
           </tr>`).join('')}</tbody>
         </table>
-      </div>`;
+      </div>
+      ${renderPager('agentCommands', pager.page, pages, total, 'loadAgentCommands')}`;
   } catch(e) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`;
   }
@@ -4848,11 +4932,14 @@ async function loadAgentReleases() {
       el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">📦</div>尚未建立任何 agent release</div>';
       return;
     }
+    const pager = getAdminPagerState('agentReleases', 10);
+    const paged = paginateClient(releases, pager.page, pager.pageSize);
+    pager.page = paged.page;
     el.innerHTML = `
       <div class="table-wrap">
         <table>
           <thead><tr><th>版本</th><th>Built At</th><th>Commit</th><th>檔案</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${releases.map(rel => `<tr>
+          <tbody>${paged.items.map(rel => `<tr>
             <td><strong>${esc(rel.version)}</strong></td>
             <td style="white-space:nowrap;font-size:13px">${fmtDate(rel.built_at)}</td>
             <td><span class="mono">${esc(rel.commit || '—')}</span></td>
@@ -4862,7 +4949,8 @@ async function loadAgentReleases() {
             </td>
           </tr>`).join('')}</tbody>
         </table>
-      </div>`;
+      </div>
+      ${renderPager('agentReleases', paged.page, paged.pages, paged.total, 'loadAgentReleases')}`;
   } catch(e) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`;
   }
@@ -5084,6 +5172,7 @@ async function loadAdminAPIKeys(projId) {
   _akProjectName = sel.options[sel.selectedIndex]?.textContent || '';
   document.getElementById('ak-proj-label').textContent = `專案：${_akProjectName}`;
   panel.style.display = '';
+  resetAdminListPage('projectApiKeys');
 
   await refreshAPIKeyTable();
 }
@@ -5099,11 +5188,14 @@ async function refreshAPIKeyTable() {
       el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">🔑</div>尚未建立任何 API Key</div>';
       return;
     }
+    const pager = getAdminPagerState('projectApiKeys', 10);
+    const paged = paginateClient(keys, pager.page, pager.pageSize);
+    pager.page = paged.page;
     el.innerHTML = `
       <div class="table-wrap">
         <table>
           <thead><tr><th>名稱</th><th>Key 前綴</th><th>狀態</th><th>過期時間</th><th>最後使用</th><th>建立時間</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${keys.map(k => `<tr>
+          <tbody>${paged.items.map(k => `<tr>
             <td style="font-weight:500">${esc(k.name)}</td>
             <td><code style="font-size:13px">${esc(k.key_prefix)}…</code></td>
             <td><span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '有效' : '已撤銷'}</span></td>
@@ -5116,7 +5208,8 @@ async function refreshAPIKeyTable() {
             </td>
           </tr>`).join('')}</tbody>
         </table>
-      </div>`;
+      </div>
+      ${renderPager('projectApiKeys', paged.page, paged.pages, paged.total, 'refreshAPIKeyTable')}`;
   } catch(e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
@@ -5209,6 +5302,7 @@ async function loadAdminSyslogKeys(syslogId) {
   _skSyslogName = sel.options[sel.selectedIndex]?.textContent || '';
   document.getElementById('sk-syslog-label').textContent = `系統日誌：${_skSyslogName}`;
   panel.style.display = '';
+  resetAdminListPage('syslogApiKeys');
 
   await refreshSyslogKeyTable();
 }
@@ -5224,11 +5318,14 @@ async function refreshSyslogKeyTable() {
       el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">🔑</div>尚未建立任何 API Key</div>';
       return;
     }
+    const pager = getAdminPagerState('syslogApiKeys', 10);
+    const paged = paginateClient(keys, pager.page, pager.pageSize);
+    pager.page = paged.page;
     el.innerHTML = `
       <div class="table-wrap">
         <table>
           <thead><tr><th>名稱</th><th>Key 前綴</th><th>狀態</th><th>過期時間</th><th>最後使用</th><th>建立時間</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${keys.map(k => `<tr>
+          <tbody>${paged.items.map(k => `<tr>
             <td style="font-weight:500">${esc(k.name)}</td>
             <td><code style="font-size:13px">${esc(k.key_prefix)}…</code></td>
             <td><span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '有效' : '已撤銷'}</span></td>
@@ -5241,7 +5338,8 @@ async function refreshSyslogKeyTable() {
             </td>
           </tr>`).join('')}</tbody>
         </table>
-      </div>`;
+      </div>
+      ${renderPager('syslogApiKeys', paged.page, paged.pages, paged.total, 'refreshSyslogKeyTable')}`;
   } catch(e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
@@ -5331,11 +5429,14 @@ async function loadSystemAPIKeys() {
       el.innerHTML = '<div class="empty" style="padding:24px"><div class="empty-icon">🔑</div>尚未建立任何系統 API Key</div>';
       return;
     }
+    const pager = getAdminPagerState('systemApiKeys', 10);
+    const paged = paginateClient(keys, pager.page, pager.pageSize);
+    pager.page = paged.page;
     el.innerHTML = `
       <div class="table-wrap">
         <table>
           <thead><tr><th>名稱</th><th>Key 前綴</th><th>狀態</th><th>過期時間</th><th>最後使用</th><th>建立時間</th><th style="text-align:right">操作</th></tr></thead>
-          <tbody>${keys.map(k => `<tr>
+          <tbody>${paged.items.map(k => `<tr>
             <td style="font-weight:500">${esc(k.name)}</td>
             <td><code style="font-size:13px">${esc(k.key_prefix)}…</code></td>
             <td><span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '有效' : '已撤銷'}</span></td>
@@ -5349,7 +5450,8 @@ async function loadSystemAPIKeys() {
           </tr>`).join('')}
           </tbody>
         </table>
-      </div>`;
+      </div>
+      ${renderPager('systemApiKeys', paged.page, paged.pages, paged.total, 'loadSystemAPIKeys')}`;
   } catch(e) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message||'載入失敗')}</div>`;
   }
@@ -5443,10 +5545,13 @@ async function loadDiskUsage() {
       return;
     }
     const ts = data.collected_at ? fmtDate(data.collected_at) : '';
+    const pager = getAdminPagerState('diskUsage', 6);
+    const paged = paginateClient(data.partitions, pager.page, pager.pageSize);
+    pager.page = paged.page;
     el.innerHTML = `
       ${ts ? `<div style="font-size:12px;color:var(--text3);margin-bottom:12px">資料收集時間：${ts}</div>` : ''}
       <div style="display:flex;flex-direction:column;gap:14px">
-        ${data.partitions.map(p => {
+        ${paged.items.map(p => {
           const pct = Math.min(100, Math.round(p.used_percent));
           const color = pct >= 90 ? 'var(--danger)' : pct >= 75 ? 'var(--warning)' : 'var(--success)';
           const totalGB = (p.total_bytes / 1073741824).toFixed(1);
@@ -5470,7 +5575,8 @@ async function loadDiskUsage() {
             </div>
           </div>`;
         }).join('')}
-      </div>`;
+      </div>
+      ${renderPager('diskUsage', paged.page, paged.pages, paged.total, 'loadDiskUsage')}`;
   } catch(e) {
     el.innerHTML = `<div class="empty" style="padding:24px"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`;
   } finally {

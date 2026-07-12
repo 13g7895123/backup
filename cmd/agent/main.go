@@ -151,7 +151,7 @@ func main() {
 			return
 		}
 		if req.Strategy == "" {
-			req.Strategy = "new"
+			req.Strategy = "overwrite"
 		}
 		if req.Strategy != "new" && req.Strategy != "overwrite" {
 			http.Error(w, `{"error":"invalid strategy"}`, http.StatusBadRequest)
