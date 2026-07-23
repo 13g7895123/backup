@@ -80,6 +80,7 @@ func RegisterAgentReleaseRoutes(mux *http.ServeMux, s *store.Store) {
 	h := &releaseHandler{rootDir: envOr("AGENT_RELEASES_DIR", "artifacts/backup-agent"), store: s}
 	mux.HandleFunc("GET /api/admin/agent-releases/capability", h.capability)
 	mux.HandleFunc("POST /api/admin/agent-releases/build", h.build)
+	mux.HandleFunc("POST /api/admin/agent-releases/register-agent", h.registerAgent)
 	mux.HandleFunc("POST /api/admin/agent-releases/import", h.importRelease)
 	mux.HandleFunc("GET /api/admin/agent-releases", h.list)
 	mux.HandleFunc("GET /api/admin/agent-releases/{version}", h.get)
@@ -187,6 +188,24 @@ func (h *releaseHandler) build(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Printf("release build request success version=%s log_ref=%s", body.Version, logPath)
 	writeJSON(w, http.StatusCreated, detail)
+}
+
+// registerAgent 單獨建立或更新 Agent 管理資料，不觸發 build。
+func (h *releaseHandler) registerAgent(w http.ResponseWriter, r *http.Request) {
+	var body agentConfigPayload
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "無效的 JSON: "+err.Error())
+		return
+	}
+	cfg, saved, err := h.registerReleaseAgent(r.Context(), &body, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agent_config":     cfg,
+		"registered_agent": saved,
+	})
 }
 
 func (h *releaseHandler) list(w http.ResponseWriter, r *http.Request) {

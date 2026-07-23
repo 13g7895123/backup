@@ -4184,6 +4184,9 @@ function renderAdmin() {
             <input id="agent-release-agent-addr" class="form-input mono" value=":9090" placeholder=":9090">
           </div>
         </div>
+        <div style="margin-top:12px;display:flex;justify-content:flex-end">
+          <button id="agent-release-register-btn" class="btn btn-secondary" onclick="registerAgentOnly()">建立 / 更新 Agent</button>
+        </div>
       </div>
       <div id="agent-releases-panel"><div class="loading"><div class="spinner"></div>載入中...</div></div>
     </div>
@@ -4953,6 +4956,59 @@ async function loadAgentReleases() {
       ${renderPager('agentReleases', paged.page, paged.pages, paged.total, 'loadAgentReleases')}`;
   } catch(e) {
     el.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${esc(e.message)}</div>`;
+  }
+}
+
+async function registerAgentOnly() {
+  const btn = document.getElementById('agent-release-register-btn');
+  const payload = {
+    name: document.getElementById('agent-release-agent-name')?.value.trim(),
+    code: document.getElementById('agent-release-agent-code')?.value.trim(),
+    base_url: document.getElementById('agent-release-agent-base-url')?.value.trim(),
+    token: document.getElementById('agent-release-agent-token')?.value.trim(),
+    dashboard_url: document.getElementById('agent-release-dashboard-url')?.value.trim(),
+    agent_addr: document.getElementById('agent-release-agent-addr')?.value.trim() || ':9090',
+  };
+  if (!payload.name || !payload.code || !payload.base_url || !payload.token || !payload.dashboard_url) {
+    toast('name, code, base_url, token, dashboard_url 不可為空', 'warning');
+    return;
+  }
+  try {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '處理中...';
+    }
+    const res = await apiPost('/api/admin/agent-releases/register-agent', payload);
+    toast(`已建立/更新 Agent：${res.registered_agent?.name || payload.name}`, 'success');
+    openModal(`Agent 設定：${esc(res.agent_config?.name || payload.name)}`, `
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:13px;color:var(--text2)">
+          Code：<span class="mono">${esc(res.agent_config?.code || '—')}</span><br>
+          Base URL：<span class="mono">${esc(res.agent_config?.base_url || '—')}</span>
+        </div>
+        <div>
+          <div class="form-label">/etc/backup-agent/env 內容</div>
+          <div style="display:flex;gap:8px">
+            <textarea id="agent-register-env-content" class="form-input mono" style="min-height:220px">${esc(res.agent_config?.env_content || '')}</textarea>
+            <button class="btn btn-secondary" onclick="copyText('agent-register-env-content')">複製</button>
+          </div>
+        </div>
+        <div>
+          <div class="form-label">一鍵套用指令</div>
+          <div style="display:flex;gap:8px">
+            <textarea id="agent-register-apply-command" class="form-input mono" style="min-height:220px">${esc(res.agent_config?.apply_command || '')}</textarea>
+            <button class="btn btn-secondary" onclick="copyText('agent-register-apply-command')">複製</button>
+          </div>
+        </div>
+      </div>
+    `, `<button class="btn btn-secondary" onclick="closeModal()">關閉</button>`, true);
+  } catch(e) {
+    toast(e.message, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '建立 / 更新 Agent';
+    }
   }
 }
 
